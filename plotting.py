@@ -22,5 +22,3 @@ def spec2plot(spectrogram):
     data = fig2np(fig)
     plt.close()
     return data
-
-def 
