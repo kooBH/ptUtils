@@ -9,7 +9,7 @@ def fig2np(fig):
     data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
     return data
 
-def plot_spectrogram_to_numpy(spectrogram):
+def spec2plot(spectrogram):
     fig, ax = plt.subplots(figsize=(12, 3))
     im = ax.imshow(spectrogram, aspect='auto', origin='lower',
                    interpolation='none')
@@ -22,3 +22,5 @@ def plot_spectrogram_to_numpy(spectrogram):
     data = fig2np(fig)
     plt.close()
     return data
+
+def 
