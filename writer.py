@@ -32,9 +32,19 @@ class MyWriter(SummaryWriter):
         self.add_image('clean',
             spec2plot(clean), step, dataformats='HWC')
  
-    def log_wav2spec(self,noisy,estim,clean,step,num_frame) :
-        noisy = torch.stft(noisy,n_fft=hp.audio.frame, hop_length = hp.aduio.shift, window = window, center = True, normalized=False, onesided=True,length=num_frame*hp.audio.shift)
-        estim = torch.stft(estim,n_fft=hp.audio.frame, hop_length = hp.aduio.shift, window = window, center = True, normalized=False, onesided=True,length=num_frame*hp.audio.shift)
-        noise = torch.stft(noise,n_fft=hp.audio.frame, hop_length = hp.aduio.shift, window = window, center = True, normalized=False, onesided=True,length=num_frame*hp.audio.shift)
+    def log_wav2spec(self,noisy,estim,clean,step) :
+        noisy = torch.from_numpy(noisy)
+        estim = torch.from_numpy(estim)
+        clean = torch.from_numpy(clean)
 
-        log_spec(noisy,estim,clean,step)
+        noisy = torch.stft(noisy,n_fft=self.hp.audio.frame, hop_length = self.hp.audio.shift, window = self.window, center = True, normalized=False, onesided=True)
+        estim = torch.stft(estim,n_fft=self.hp.audio.frame, hop_length = self.hp.audio.shift, window = self.window, center = True, normalized=False, onesided=True)
+        clean = torch.stft(clean,n_fft=self.hp.audio.frame, hop_length = self.hp.audio.shift, window = self.window, center = True, normalized=False, onesided=True)
+
+        self.log_spec(noisy,estim,clean,step)
+
+
+if __name__=='__main__':
+    data = np.load('input.npy')
+    print("input shape : " + str(np.shape(data)))
+    spec2plot(data)

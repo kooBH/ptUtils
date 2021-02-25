@@ -10,6 +10,13 @@ def fig2np(fig):
     return data
 
 def spec2plot(spectrogram):
+
+    if len(np.shape(spectrogram)) == 3 :
+        spectrogram = np.power(2,spectrogram[:,:,0]) + np.power(2,spectrogram[:,:,1])
+        spectrogram = 10*np.log(spectrogram)
+    else :
+        raise ValueError("not implemented yet")
+
     fig, ax = plt.subplots(figsize=(12, 3))
     im = ax.imshow(spectrogram, aspect='auto', origin='lower',
                    interpolation='none')
@@ -22,3 +29,5 @@ def spec2plot(spectrogram):
     data = fig2np(fig)
     plt.close()
     return data
+
+
