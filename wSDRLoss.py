@@ -1,9 +1,11 @@
 import torch
 
 # (7) weighted-SDR loss
-def wSDRLoss(mixed, clean, clean_est, eps=2e-7):
+def wSDRLoss(mixed, clean, clean_est, alpha_type='default',eps=2e-7):
     # Used on signal level(time-domain). Backprop-able istft should be used.
     # Batched audio inputs shape (N x T) required.
+
+    alpha = None
 
     # Batch preserving sum for convenience.
     # (6)
@@ -18,11 +20,14 @@ def wSDRLoss(mixed, clean, clean_est, eps=2e-7):
     noise = mixed - clean
     noise_est = mixed - clean_est
 
-    alpha_clean = torch.sum(clean**2, dim=1)
-    alpha_noise = torch.sum(noise**2, dim=1)
-
-    # alpha : the energy ratio between clean speech and noise
-    alpha = alpha_clean / (alpha_clean + alpha_noise + eps)
+    if alpha_type == 'defalut' :
+        alpha_clean = torch.sum(clean**2, dim=1)
+        alpha_noise = torch.sum(noise**2, dim=1)
+        # alpha : the energy ratio between clean speech and noise
+        alpha = alpha_clean / (alpha_clean + alpha_noise + eps)
+    else :
+        # give all wegiht(0.99) to speech leave small weight(0.01) for noise only case
+        alpha = float(alpha_type)
     wSDR = (alpha * mSDRLoss(clean, clean_est)
             + (1 - alpha) * mSDRLoss(noise, noise_est))
     return torch.mean(wSDR)

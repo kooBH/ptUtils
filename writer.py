@@ -62,11 +62,11 @@ class MyWriter(SummaryWriter):
 
     # add_image(tag, img_tensor, global_step=None, walltime=None, dataformats='CHW')
     def log_spec(self,noisy,estim,clean,step) :
-        self.add_image('noisy',
+        self.add_image('noisy_spec',
             spec2plot(noisy), step, dataformats='HWC')
-        self.add_image('estim',
+        self.add_image('estim_spec',
             spec2plot(estim), step, dataformats='HWC')
-        self.add_image('clean',
+        self.add_image('clean_spec',
             spec2plot(clean), step, dataformats='HWC')
  
     def log_wav2spec(self,noisy,estim,clean,step) :
