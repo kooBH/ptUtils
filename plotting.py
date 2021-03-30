@@ -15,7 +15,7 @@ def MFCC2plot(MFCC):
     fig, ax = plt.subplots()
     im = plt.imshow(MFCC, cmap=cm.jet, aspect='auto')
     plt.colorbar(im)
-    plt.ylim(-80,20)
+    plt.clim(-80,20)
     fig.canvas.draw()
 
     data = fig2np(fig)
