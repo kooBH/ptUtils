@@ -7,142 +7,132 @@ import torch
 
 # NOTE ::  SDR == SI-SDR, 
 
-defalut_n_fft = 1024
-window = torch.hann_window(window_length=defalut_n_fft,periodic=True, dtype=None, 
-                           layout=torch.strided, device=None, requires_grad=False)
+class SDR : 
+    def __init__(self,deivce,n_fft=1024):
+        self.n_fft = 1024
+        self.device = device
 
-window = window.to('cuda:1')
-
-# Based on https://github.com/sigsep/bsseval/issues/3
-def SISDR(output, target, inSTFT=True, n_fft=1024):
-    global window
-    if inSTFT : 
-        if n_fft != defalut_n_fft : 
-            window = torch.hann_window(window_length=fft_size,periodic=True, dtype=None, 
+        self.window = torch.hann_window(window_length=self.n_fft,periodic=True, dtype=None, 
                            layout=torch.strided, device=None, requires_grad=False)
+        self.window = self.window.to(device)
+
+    def istft(self,x):
+        return torch.istft(x, self,n_fft, hop_length=None, win_length=None, window=self.window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
+
+    # Based on https://github.com/sigsep/bsseval/issues/3
+    def SISDR(self,output, target, inSTFT=True):
+        if inSTFT : 
+            output = self.istft(output)
+            target = self.istft(target)
+
+        Rss= torch.dot(target, target)
             
-        output = torch.istft(output, n_fft, hop_length=None, win_length=None, window=window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
-        target= torch.istft(target, n_fft, hop_length=None, win_length=None, window=window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
+        e_target= (torch.dot( target, output) / Rss) * target
+        e_res= e_target - output
 
-    Rss= torch.dot(target, target)
+        Sss= (e_target**2).sum()
+        Snn= (e_res**2).sum()
+
+        # SDR on dB scale
+        #SISDR= 10 * torch.log10(Sss/Snn)
+        SISDR= Sss/Snn
         
-    e_target= (torch.dot( target, output) / Rss) * target
-    e_res= e_target - output
+        # Get the SIR
+        # Rsr= np.dot(target.transpose(), e_res)
+        # b= np.linalg.solve(Rss, Rsr)
 
-    Sss= (e_target**2).sum()
-    Snn= (e_res**2).sum()
+        #e_interf= np.dot(target, b)
+        #e_artif= e_res - e_interf
+        
+        #SIR= 10 * math.log10(Sss / (e_interf**2).sum())
+        #SAR= 10 * math.log10(Sss / (e_artif**2).sum())
 
-    # SDR on dB scale
-    #SISDR= 10 * torch.log10(Sss/Snn)
-    SISDR= Sss/Snn
-    
-    # Get the SIR
-    # Rsr= np.dot(target.transpose(), e_res)
-    # b= np.linalg.solve(Rss, Rsr)
+        #return SDR, SIR,SAR
+        return SISDR
 
-    #e_interf= np.dot(target, b)
-    #e_artif= e_res - e_interf
-    
-    #SIR= 10 * math.log10(Sss / (e_interf**2).sum())
-    #SAR= 10 * math.log10(Sss / (e_artif**2).sum())
+    # to compare
+    def SDRLoss(self,output,target, inSTFT=True, eps=2e-7):
+        if inSTFT : 
+            output = self.istft(output)
+            target = self.istft(target)
 
-    #return SDR, SIR,SAR
-    return SISDR
+        xy = torch.diag(output @ target.t())
+        yy = torch.diag(target @ target.t())
+        xx = torch.diag(output @ output.t())
 
-# to compare
-def SDRLoss(output,target, inSTFT=True, n_fft=1024,eps=2e-7):
-    global window
+        SDR = xy**2/ (yy*xx - xy**2 )
+        return torch.mean(1/SDR)
 
-    if inSTFT : 
-        if n_fft != defalut_n_fft : 
-            window = torch.hann_window(window_length=fft_size,periodic=True, dtype=None, 
-                           layout=torch.strided, device=None, requires_grad=False)
-            
-        output = torch.istft(output, n_fft, hop_length=None, win_length=None, window=window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
-        target= torch.istft(target, n_fft, hop_length=None, win_length=None, window=window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
+    # mSDR is not Scale Invariant
+    def mSDRLoss(self,output,target, inSTFT=True, eps=2e-7):
+        if inSTFT : 
+            output = self.istft(output)
+            target = self.istft(target)
+        # Modified SDR loss, <x, x`> / (||x|| * ||x`||) : L2 Norm.
+        # Original SDR Loss: <x, x`>**2 / <x`, x`> (== ||x`||**2)
+        #  > Maximize Correlation while producing minimum energy output.
+        #xx = torch.dot(output,output)
+        #xy = torch.dot(output,target)
 
-    xy = torch.diag(output @ target.t())
-    yy = torch.diag(target @ target.t())
-    xx = torch.diag(output @ output.t())
+        #return xx/(xy**2)
+        correlation = torch.sum(target * output, dim=1)
+        energies = torch.norm(target, p=2, dim=1) * torch.norm(output, p=2, dim=1)
 
-    SDR = xy**2/ (yy*xx - xy**2 )
-    return torch.mean(1/SDR)
+        return torch.mean(-(correlation / (energies + eps)))
 
-# mSDR is not Signal Invariant
-def mSDRLoss(output,target, inSTFT=True, n_fft=1024, eps=2e-7):
-    global window
-    if inSTFT : 
-        if n_fft != defalut_n_fft : 
-            window = torch.hann_window(window_length=fft_size,periodic=True, dtype=None, 
-                           layout=torch.strided, device=None, requires_grad=False)
-            
-        output = torch.istft(output, n_fft, hop_length=None, win_length=None, window=window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
-        target= torch.istft(target, n_fft, hop_length=None, win_length=None, window=window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
-    # Modified SDR loss, <x, x`> / (||x|| * ||x`||) : L2 Norm.
-    # Original SDR Loss: <x, x`>**2 / <x`, x`> (== ||x`||**2)
-    #  > Maximize Correlation while producing minimum energy output.
-    #xx = torch.dot(output,output)
-    #xy = torch.dot(output,target)
+    # test
+    def test(self):
+        root = '/home/data/kbh/MCSE/CGMM_RLS_MPDR/'
+        clean_path = root + 'clean/011_011C0201.pt'
+        SNRm5 = root + 'SNR-5/estimated_speech/011_011C0201.pt'
+        SNR0 = root + 'SNR0/estimated_speech/011_011C0201.pt'
+        SNRp5 = root + 'SNR5/estimated_speech/011_011C0201.pt'
 
-    #return xx/(xy**2)
-    correlation = torch.sum(target * output, dim=1)
-    energies = torch.norm(target, p=2, dim=1) * torch.norm(output, p=2, dim=1)
+        spec_clean = torch.load(clean_path)
+        spec_SNRm5 = torch.load(SNRm5)
+        spec_SNR0  = torch.load(SNR0)
+        spec_SNRp5 = torch.load(SNRp5)
 
-    return torch.mean(-(correlation / (energies + eps)))
+        print(spec_clean.shape)
 
-# test
-if __name__ == '__main__' :
-    root = '/home/data/kbh/MCSE/CGMM_RLS_MPDR/'
-    clean_path = root + 'clean/011_011C0201.pt'
-    SNRm5 = root + 'SNR-5/estimated_speech/011_011C0201.pt'
-    SNR0 = root + 'SNR0/estimated_speech/011_011C0201.pt'
-    SNRp5 = root + 'SNR5/estimated_speech/011_011C0201.pt'
+        SDRm5_1 = self.SDRLoss(spec_SNRm5,spec_clean)
+        SDR0_1 = self.SDRLoss(spec_SNR0,spec_clean)
+        SDRp5_1 = self.SDRLoss(spec_SNRp5,spec_clean)
 
-    spec_clean = torch.load(clean_path)
-    spec_SNRm5 = torch.load(SNRm5)
-    spec_SNR0  = torch.load(SNR0)
-    spec_SNRp5 = torch.load(SNRp5)
+        SDRm5_2 = self.mSDRLoss(spec_SNRm5,spec_clean)
+        SDR0_2 = self.mSDRLoss(spec_SNR0,spec_clean)
+        SDRp5_2 = self.mSDRLoss(spec_SNRp5,spec_clean)
 
-    print(spec_clean.shape)
+        spec_clean = spec_clean * 30
 
-    SDRm5_1 = SDRLoss(spec_SNRm5,spec_clean)
-    SDR0_1 = SDRLoss(spec_SNR0,spec_clean)
-    SDRp5_1 = SDRLoss(spec_SNRp5,spec_clean)
+        SDRm5_3 = self.SDRLoss(spec_SNRm5,spec_clean)
+        SDR0_3 = self.SDRLoss(spec_SNR0,spec_clean)
+        SDRp5_3 = self.SDRLoss(spec_SNRp5,spec_clean)
 
-    SDRm5_2 = mSDRLoss(spec_SNRm5,spec_clean)
-    SDR0_2 = mSDRLoss(spec_SNR0,spec_clean)
-    SDRp5_2 = mSDRLoss(spec_SNRp5,spec_clean)
+        SDRm5_4 = self.mSDRLoss(spec_SNRm5,spec_clean)
+        SDR0_4 = self.mSDRLoss(spec_SNR0,spec_clean)
+        SDRp5_4 = self.mSDRLoss(spec_SNRp5,spec_clean)
 
-    spec_clean = spec_clean * 30
+        print('--- SDR ---')
+        print(SDRm5_1)
+        print(SDR0_1)
+        print(SDRp5_1)
+        print('--- mSDR ---')
+        print(SDRm5_2)
+        print(SDR0_2)
+        print(SDRp5_2)
+        print('--- SDR *30 ---')
+        print(SDRm5_3)
+        print(SDR0_3)
+        print(SDRp5_3)
+        print('--- mSDR *30 ---')
+        print(SDRm5_4)
+        print(SDR0_4)
+        print(SDRp5_4)
+        print('--- mSDR (x,x) ---')
+        print(self.mSDRLoss(spec_clean,spec_clean))
 
-    SDRm5_3 = SDRLoss(spec_SNRm5,spec_clean)
-    SDR0_3 = SDRLoss(spec_SNR0,spec_clean)
-    SDRp5_3 = SDRLoss(spec_SNRp5,spec_clean)
+        print('--------------')
+        print(self.SDRLoss(spec_clean,spec_clean))
 
-    SDRm5_4 = mSDRLoss(spec_SNRm5,spec_clean)
-    SDR0_4 = mSDRLoss(spec_SNR0,spec_clean)
-    SDRp5_4 = mSDRLoss(spec_SNRp5,spec_clean)
-
-    print('--- SDR ---')
-    print(SDRm5_1)
-    print(SDR0_1)
-    print(SDRp5_1)
-    print('--- mSDR ---')
-    print(SDRm5_2)
-    print(SDR0_2)
-    print(SDRp5_2)
-    print('--- SDR *30 ---')
-    print(SDRm5_3)
-    print(SDR0_3)
-    print(SDRp5_3)
-    print('--- mSDR *30 ---')
-    print(SDRm5_4)
-    print(SDR0_4)
-    print(SDRp5_4)
-    print('--- mSDR (x,x) ---')
-    print(mSDRLoss(spec_clean,spec_clean))
-
-    print('--------------')
-    print(SDRLoss(spec_clean,spec_clean))
-
-    # Same Output
+        # Same Output
