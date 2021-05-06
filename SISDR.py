@@ -65,7 +65,7 @@ class SDR :
     
     def iSDRLoss(self,output,target, inSTFT=True, eps=2e-7):
         sdr = self.SDRLoss(output,target,inSTFT,eps)
-        return i/sdr
+        return 1/sdr
 
     # mSDR is not Scale Invariant
     def mSDRLoss(self,output,target, inSTFT=True, eps=2e-7):
