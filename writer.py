@@ -61,13 +61,9 @@ class MyWriter(SummaryWriter):
         #self.add_image('output',output,step)
 
     # add_image(tag, img_tensor, global_step=None, walltime=None, dataformats='CHW')
-    def log_spec(self,noisy,estim,clean,step) :
-        self.add_image('noisy_spec',
-            spec2plot(noisy), step, dataformats='HWC')
-        self.add_image('estim_spec',
-            spec2plot(estim), step, dataformats='HWC')
-        self.add_image('clean_spec',
-            spec2plot(clean), step, dataformats='HWC')
+    def log_spec(self,data,label,step) :
+        self.add_image(label,
+            spec2plot(data), step, dataformats='HWC')
  
     def log_wav2spec(self,noisy,estim,clean,step) :
         noisy = torch.from_numpy(noisy)

@@ -8,8 +8,8 @@ import torch
 # NOTE ::  SDR == SI-SDR, 
 
 class SDR : 
-    def __init__(self,deivce,n_fft=1024):
-        self.n_fft = 1024
+    def __init__(self,device,n_fft=1024):
+        self.n_fft = n_fft
         self.device = device
 
         self.window = torch.hann_window(window_length=self.n_fft,periodic=True, dtype=None, 
@@ -17,7 +17,7 @@ class SDR :
         self.window = self.window.to(device)
 
     def istft(self,x):
-        return torch.istft(x, self,n_fft, hop_length=None, win_length=None, window=self.window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
+        return torch.istft(x, self.n_fft, hop_length=None, win_length=None, window=self.window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
 
     # Based on https://github.com/sigsep/bsseval/issues/3
     def SISDR(self,output, target, inSTFT=True):
@@ -61,7 +61,11 @@ class SDR :
         xx = torch.diag(output @ output.t())
 
         SDR = xy**2/ (yy*xx - xy**2 )
-        return torch.mean(1/SDR)
+        return torch.mean(SDR)
+    
+    def iSDRLoss(self,output,target, inSTFT=True, eps=2e-7):
+        sdr = self.SDRLoss(output,target,inSTFT,eps)
+        return i/sdr
 
     # mSDR is not Scale Invariant
     def mSDRLoss(self,output,target, inSTFT=True, eps=2e-7):
