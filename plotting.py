@@ -11,7 +11,6 @@ def fig2np(fig):
 
 def MFCC2plot(MFCC):
     MFCC = np.transpose(MFCC)
-
     fig, ax = plt.subplots()
     im = plt.imshow(MFCC, cmap=cm.jet, aspect='auto')
     plt.colorbar(im)
@@ -22,25 +21,20 @@ def MFCC2plot(MFCC):
     plt.close()
     return data
 
-# Not working
-def spec2plot(spectrogram):
-    if len(np.shape(spectrogram)) == 3 :
-        spectrogram = np.power(2,spectrogram[:,:,0]) + np.power(2,spectrogram[:,:,1])
-        spectrogram = 10*np.log(spectrogram)
-    else :
-        raise ValueError("not implemented yet")
-
-    fig, ax = plt.subplots(figsize=(12, 3))
-    im = ax.imshow(spectrogram, aspect='auto', origin='lower',
-                   interpolation='none')
-    plt.colorbar(im, ax=ax)
-    plt.xlabel('Frames')
-    plt.ylabel('Channels')
-    plt.tight_layout()
-
+def spec2plot(data,normalized=True):
+    data = data.detach().cpu().numpy()
+    spec = np.power(data[:,:,0],2) + np.power(data[:,:,1],2)
+    spec = 10*np.log(spec)
+    fig, ax = plt.subplots()
+    im = plt.imshow(spec, cmap=cm.jet, aspect='auto',origin='lower')
+    plt.colorbar(im)
+    plt.clim(-80,20)
+    
+    plt.xlabel('Time')
+    plt.ylabel('Freq')
+    
     fig.canvas.draw()
-    data = fig2np(fig)
-    plt.close()
-    return data
+    plot = fig2np(fig)
+    return plot
 
 
