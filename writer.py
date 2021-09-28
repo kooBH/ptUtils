@@ -3,9 +3,9 @@ import torch
 from tensorboardX import SummaryWriter
 
 try : 
-    from .plotting import spec2plot,MFCC2plot
+    from .plotting import spec2plot,MFCC2plot,mag2plot
 except ImportError:
-    from plotting import spec2plot,MFCC2plot
+    from plotting import spec2plot,MFCC2plot,mag2plot
 
 # https://pytorch.org/docs/stable/tensorboard.html
 
@@ -25,10 +25,8 @@ class MyWriter(SummaryWriter):
     def log_test(self,test_loss,step) : 
         self.add_scalar('test_loss', test_loss, step)
 
-    def log_audio(self,noisy,estim,output,clean,step) : 
-        self.add_audio('noisy', noisy, step, self.hp.audio.samplerate)
-        self.add_audio('estim', estim, step, self.hp.audio.samplerate)
-        self.add_audio('clean', clean, step, self.hp.audio.samplerate)
+    def log_audio(self,wav,label='label',step=0) : 
+        self.add_audio(label, wav, step, self.hp.audio.samplerate)
 
     def log_MFCC(self,input,output,clean,step):
         input = input.to('cpu')
@@ -64,6 +62,10 @@ class MyWriter(SummaryWriter):
     def log_spec(self,data,label,step) :
         self.add_image(label,
             spec2plot(data), step, dataformats='HWC')
+
+    def log_mag(self,data,label,step):
+        self.add_image(label,
+            mag2plot(data), step, dataformats='HWC')
  
     def log_wav2spec(self,noisy,estim,clean,step) :
         noisy = torch.from_numpy(noisy)

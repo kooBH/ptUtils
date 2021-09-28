@@ -5,7 +5,7 @@ import torch
 # (2019,ICASSP)SDR – Half-baked or Well Done?
 # https://ieeexplore.ieee.org/abstract/document/8683855
 
-# NOTE ::  SDR == SI-SDR, 
+# NOTE ::  SDR == SI-SDR 
 
 class SDR : 
     def __init__(self,device,n_fft=1024):
@@ -13,8 +13,7 @@ class SDR :
         self.device = device
 
         self.window = torch.hann_window(window_length=self.n_fft,periodic=True, dtype=None, 
-                           layout=torch.strided, device=None, requires_grad=False)
-        self.window = self.window.to(device)
+                           layout=torch.strided, device=device, requires_grad=False)
 
     def istft(self,x):
         return torch.istft(x, self.n_fft, hop_length=None, win_length=None, window=self.window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
@@ -83,60 +82,18 @@ class SDR :
         energies = torch.norm(target, p=2, dim=1) * torch.norm(output, p=2, dim=1)
 
         return torch.mean(-(correlation / (energies + eps)))
+    
+    def wSDRLoss(self,output,noisy,target,alpha=0.9,inSTFT=True,eps=2e-7):
+        if inSTFT : 
+            output = self.istft(output)
+            target = self.istft(target)
+            noisy  = self.istft(noisy)
+        noise = noisy - target
+        noise_est = noisy - output
 
-    # test
-    def test(self):
-        root = '/home/data/kbh/MCSE/CGMM_RLS_MPDR/'
-        clean_path = root + 'clean/011_011C0201.pt'
-        SNRm5 = root + 'SNR-5/estimated_speech/011_011C0201.pt'
-        SNR0 = root + 'SNR0/estimated_speech/011_011C0201.pt'
-        SNRp5 = root + 'SNR5/estimated_speech/011_011C0201.pt'
-
-        spec_clean = torch.load(clean_path)
-        spec_SNRm5 = torch.load(SNRm5)
-        spec_SNR0  = torch.load(SNR0)
-        spec_SNRp5 = torch.load(SNRp5)
-
-        print(spec_clean.shape)
-
-        SDRm5_1 = self.SDRLoss(spec_SNRm5,spec_clean)
-        SDR0_1 = self.SDRLoss(spec_SNR0,spec_clean)
-        SDRp5_1 = self.SDRLoss(spec_SNRp5,spec_clean)
-
-        SDRm5_2 = self.mSDRLoss(spec_SNRm5,spec_clean)
-        SDR0_2 = self.mSDRLoss(spec_SNR0,spec_clean)
-        SDRp5_2 = self.mSDRLoss(spec_SNRp5,spec_clean)
-
-        spec_clean = spec_clean * 30
-
-        SDRm5_3 = self.SDRLoss(spec_SNRm5,spec_clean)
-        SDR0_3 = self.SDRLoss(spec_SNR0,spec_clean)
-        SDRp5_3 = self.SDRLoss(spec_SNRp5,spec_clean)
-
-        SDRm5_4 = self.mSDRLoss(spec_SNRm5,spec_clean)
-        SDR0_4 = self.mSDRLoss(spec_SNR0,spec_clean)
-        SDRp5_4 = self.mSDRLoss(spec_SNRp5,spec_clean)
-
-        print('--- SDR ---')
-        print(SDRm5_1)
-        print(SDR0_1)
-        print(SDRp5_1)
-        print('--- mSDR ---')
-        print(SDRm5_2)
-        print(SDR0_2)
-        print(SDRp5_2)
-        print('--- SDR *30 ---')
-        print(SDRm5_3)
-        print(SDR0_3)
-        print(SDRp5_3)
-        print('--- mSDR *30 ---')
-        print(SDRm5_4)
-        print(SDR0_4)
-        print(SDRp5_4)
-        print('--- mSDR (x,x) ---')
-        print(self.mSDRLoss(spec_clean,spec_clean))
-
-        print('--------------')
-        print(self.SDRLoss(spec_clean,spec_clean))
-
-        # Same Output
+        wSDR = alpha* self.mSDRLoss(output,target,inSTFT=False,eps=eps) + (1-alpha)*self.mSDRLoss(noise_est,noise,inSTFT=False,eps=eps)
+        return wSDR
+    
+    def STFTSDRLoss(self,output,target):
+        # [B, F, T, C]
+        diff = torch.abs(output - target)        

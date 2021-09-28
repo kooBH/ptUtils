@@ -4,6 +4,7 @@ import matplotlib.pylab as plt
 import numpy as np
 from matplotlib import cm
 
+
 def fig2np(fig):
     data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
     data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
@@ -23,10 +24,15 @@ def MFCC2plot(MFCC):
 
 def spec2plot(data,normalized=True):
     data = data.detach().cpu().numpy()
-    spec = np.power(data[:,:,0],2) + np.power(data[:,:,1],2)
-    spec = 10*np.log(spec)
+    # if not in magnitude
+    if np.shape(data)[-1] == 2 :
+        mag = np.power(data[:,:,0],2) + np.power(data[:,:,1],2)
+    else :
+        mag = data
+    np.seterr(divide = 'warn') 
+    mag = 10*np.log(mag)
     fig, ax = plt.subplots()
-    im = plt.imshow(spec, cmap=cm.jet, aspect='auto',origin='lower')
+    im = plt.imshow(mag, cmap=cm.jet, aspect='auto',origin='lower')
     plt.colorbar(im)
     plt.clim(-80,20)
     
@@ -37,4 +43,17 @@ def spec2plot(data,normalized=True):
     plot = fig2np(fig)
     return plot
 
-
+def mag2plot(data):
+    mag = data.detach().cpu().numpy()
+    mag = 10*np.log(mag)
+    fig, ax = plt.subplots()
+    im = plt.imshow(mag, cmap=cm.jet, aspect='auto',origin='lower')
+    plt.colorbar(im)
+    plt.clim(-80,20)
+    
+    plt.xlabel('Time')
+    plt.ylabel('Freq')
+    
+    fig.canvas.draw()
+    plot = fig2np(fig)
+    return plot
