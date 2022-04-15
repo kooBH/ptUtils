@@ -13,7 +13,7 @@ class MyWriter(SummaryWriter):
     def __init__(self, hp, logdir):
         super(MyWriter, self).__init__(logdir)
         self.hp = hp
-        self.window = torch.hann_window(window_length=hp.audio.frame, periodic=True,
+        self.window = torch.hann_window(window_length=512, periodic=True,
                                dtype=None, layout=torch.strided, device=None,
                                requires_grad=False)
     def log_value(self, train_loss, step,tag):
@@ -26,7 +26,7 @@ class MyWriter(SummaryWriter):
         self.add_scalar('test_loss', test_loss, step)
 
     def log_audio(self,wav,label='label',step=0) : 
-        self.add_audio(label, wav, step, self.hp.audio.samplerate)
+        self.add_audio(label, wav, step, 16000)
 
     def log_MFCC(self,input,output,clean,step):
         input = input.to('cpu')

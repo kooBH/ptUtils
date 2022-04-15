@@ -1,6 +1,28 @@
 import torch
 import librosa
 
+
+"""
+SI-SDR(Scale Invariant Source-to-Distortion Ratio)
+== SI-SNR
+(2019,ICASSP)SDR – Half-baked or Well Done?
+https://ieeexplore.ieee.org/abstract/document/8683855
+
+Based on https://github.com/sigsep/bsseval/issues/3
+"""
+def SISDR(output, target):
+    # scaling factor 
+    alpha =  torch.mul(output,target)/torch.sum(target**2)
+
+    numer =  torch.sum((alpha*target)**2)
+    denom =  torch.sum((alpha*target-output)**2)
+    #dB scale
+    loss = 10*torch.log10(numer/denom)
+
+    return loss
+
+
+
 class LossBundle:
     def __init__(self,hp,device):
         self.hp = hp
@@ -20,7 +42,7 @@ class LossBundle:
 
         self.eps = 1e-7
 
-## Aux
+    ## Aux
 
     def stft(self,x):
         return torch.stft(x, self.n_fft, hop_length=None, win_length=None, window=self.window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
@@ -30,16 +52,16 @@ class LossBundle:
             # real,imag to complex
             # [n_batch, n_fft, n_frame, real imag]
             x = torch.complex(x[:,:,:,0],x[:,:,:,1])
-# input (Tensor) –
-#
-# The input tensor. Expected to be output of stft(), 
-# can either be complex (channel, fft_size, n_frame), 
-# or real (channel, fft_size, n_frame, 2) where the channel dimension is optional.
-# 
-# Deprecated since version 1.8.0: Real input is deprecated, use complex inputs as returned by stft(..., return_complex=True) instead.
+    # input (Tensor) –
+    #
+    # The input tensor. Expected to be output of stft(), 
+    # can either be complex (channel, fft_size, n_frame), 
+    # or real (channel, fft_size, n_frame, 2) where the channel dimension is optional.
+    # 
+    # Deprecated since version 1.8.0: Real input is deprecated, use complex inputs as returned by stft(..., return_complex=True) instead.
         return torch.istft(x, self.n_fft, hop_length=None, win_length=None, window=self.window, center=True, normalized=False, onesided=None, length=None, return_complex=False)
 
-## LOSS
+    ## LOSS
 
     # SI-SDR(Scale Invariant Source-to-Distortion Ratio)
 
