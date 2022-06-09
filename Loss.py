@@ -10,18 +10,53 @@ https://ieeexplore.ieee.org/abstract/document/8683855
 
 Based on https://github.com/sigsep/bsseval/issues/3
 """
-def SISDR(output, target):
+def SISDRLoss(output, target):
     # scaling factor 
     alpha =  torch.mul(output,target)/torch.sum(target**2)
 
     numer =  torch.sum((alpha*target)**2)
-    denom =  torch.sum((alpha*target-output)**2)
+    denom =  torch.sum((output-alpha*target)**2)
     #dB scale
-    loss = 10*torch.log10(numer/denom)
+    sdr = 20*torch.log10(numer/denom)
 
-    return loss
+    return -sdr
 
+# mSDR == CosineSimilarity
+# mSDR is not Scale Invariant
+def mSDRLoss(output,target, eps=1e-7):
+    # Modified SDR loss, <x, x`> / (||x|| * ||x`||) : L2 Norm.
+    # Original SDR Loss: <x, x`>**2 / <x`, x`> (== ||x`||**2)
+    #  > Maximize Correlation while producing minimum energy output.
+    #xx = torch.dot(output,output)
+    #xy = torch.dot(output,target)
 
+    #return xx/(xy**2)
+    correlation = torch.sum(target * output, dim=1)
+    energies = torch.norm(target, p=2, dim=1) * torch.norm(output, p=2, dim=1)
+
+    return torch.mean(-(correlation / (energies + eps)))
+
+def wSDRLoss(output,noisy,target,alpha=0.01,inSTFT=True,eps=2e-7):
+        noise = noisy - target
+        noise_est = noisy - output
+
+        wSDR = alpha * mSDRLoss(output,target,eps=eps) + (1-alpha)*mSDRLoss(noise_est,noise,eps=eps)
+        return wSDR
+
+def SDR(output,target, eps=2e-7):
+    xy = torch.diag(output @ target.t())
+    yy = torch.diag(target @ target.t())
+    xx = torch.diag(output @ output.t())
+
+    SDR = xy**2/ (yy*xx - xy**2 )
+    return torch.mean(SDR)
+
+def iSDRLoss(output,target, eps=2e-7):
+    sdr = SDR(output,target,eps)
+    return 1/sdr
+
+def logSDRLoss(output,target, eps=2e-7):
+    return SDR(output,target,eps)
 
 class LossBundle:
     def __init__(self,hp,device):
