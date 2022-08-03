@@ -3,7 +3,9 @@ matplotlib.use('Agg')
 import matplotlib.pylab as plt
 import numpy as np
 from matplotlib import cm
-
+import io
+import PIL.Image
+from torchvision.transforms import ToTensor
 
 def fig2np(fig):
     data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
@@ -57,3 +59,54 @@ def mag2plot(data):
     fig.canvas.draw()
     plot = fig2np(fig)
     return plot
+
+"""
+wav2plotDOA : 
+    wavfrom 2 tensorboard image
+    Impelemented for DOA-Separation
+
+input
+    + waveform : numpy array[9,n_sample]
+"""
+def wav2plotDOA(waveform, sample_rate=16000):
+    num_channels = waveform.shape[0]
+    num_frames = waveform.shape[1]
+    time_axis = np.arange(start=0, stop=num_frames) / sample_rate
+
+    figure, axes = plt.subplots(2, 4)
+
+    ## input plotting routine 
+    #gs = axes[0,0].get_gridspec()
+    #for ax in axes[0,:]:
+    #    ax.remove()
+    # big = figure.add_subplot(gs[0,:])
+    # big.set_title('input')
+    # big.plot(time_axis, waveform[0], linewidth=1)
+        
+    
+    for c in range(4):
+        idx_y = 0
+        idx_x = c
+        
+        axes[idx_y,idx_x].plot(time_axis, waveform[0+c], linewidth=1)
+        axes[idx_y,idx_x].grid(True)
+        axes[idx_y,idx_x].set_title(f'target {c}')
+        
+    for c in range(4):
+        idx_y = 1
+        idx_x = c
+        
+        axes[idx_y,idx_x].plot(time_axis, waveform[4+c], linewidth=1)
+        axes[idx_y,idx_x].grid(True)
+        axes[idx_y,idx_x].set_title(f'output {c}')
+        
+    figure.set_size_inches(14, 10)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='jpeg')
+    
+    buf.seek(0)
+    
+    image = PIL.Image.open(buf)
+    image = ToTensor()(image)
+    return image

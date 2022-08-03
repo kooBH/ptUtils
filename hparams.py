@@ -1,15 +1,12 @@
 # modified from https://github.com/HarryVolek/PyTorch_Speaker_Verification
-
 import os
 import yaml
-
 
 def load_hparam_str(hp_str):
     path = os.path.join('config', 'temp-restore.yaml')
     with open(path, 'w') as f:
         f.write(hp_str)
     return HParam(path)
-
 
 def load_hparam(filename):
     stream = open(filename, 'r')
@@ -20,7 +17,6 @@ def load_hparam(filename):
             hparam_dict[k] = v
     return hparam_dict
 
-
 def merge_dict(user, default):
     if isinstance(user, dict) and isinstance(default, dict):
         for k, v in default.items():
@@ -29,7 +25,6 @@ def merge_dict(user, default):
             else:
                 user[k] = merge_dict(user[k], v)
     return user
-
 
 class Dotdict(dict):
     """
@@ -50,13 +45,19 @@ class Dotdict(dict):
                 value = Dotdict(value)
             self[key] = value
 
-
 class HParam(Dotdict):
 
-    def __init__(self, file):
+    def __init__(self, file_target, file_default=None):
         super(Dotdict, self).__init__()
-        hp_dict = load_hparam(file)
-        hp_dotdict = Dotdict(hp_dict)
+        
+        if file_default is not None : 
+            hp_dict_base = load_hparam(file_default)
+            hp_dict_update = load_hparam(file_target)
+            hp_dict_base.update(hp_dict_update)
+        else :
+            hp_dict_base = load_hparam(file_target)
+        
+        hp_dotdict = Dotdict(hp_dict_base)
         for k, v in hp_dotdict.items():
             setattr(self, k, v)
             

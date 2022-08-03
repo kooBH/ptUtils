@@ -1,7 +1,6 @@
 import torch
 import librosa
 
-
 """
 SI-SDR(Scale Invariant Source-to-Distortion Ratio)
 == SI-SNR
@@ -57,6 +56,21 @@ def iSDRLoss(output,target, eps=2e-7):
 
 def logSDRLoss(output,target, eps=2e-7):
     return SDR(output,target,eps)
+
+def wMSELoss(output,target,alpha=0.9,eps=1e-13):
+    s_mag = torch.abs(target)
+    s_hat_mag = torch.abs(output)
+
+    # scale
+    s_mag= torch.log10(1+s_mag)
+    s_hat_mag= torch.log10(1+s_hat_mag)
+ 
+    s_mag = s_mag/torch.max(s_mag)
+    s_hat_mag = s_hat_mag/torch.max(s_hat_mag)
+
+    d = s_mag - s_hat_mag
+
+    return torch.mean(alpha*(d + d.abs())/2 + (1-alpha) * (d-d.abs()).abs()/2)
 
 class LossBundle:
     def __init__(self,hp,device):
@@ -262,9 +276,6 @@ class LossBundle:
             pass
         else :
             raise Exception('Unknown scale type : '+ str(self.hp.loss.mwMSE.scale))
-
-
-
 
         # mel
         s = torch.matmul(self.mel_basis,s_mag)
