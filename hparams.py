@@ -53,7 +53,7 @@ class HParam(Dotdict):
         if file_default is not None : 
             hp_dict_base = load_hparam(file_default)
             hp_dict_update = load_hparam(file_target)
-            hp_dict_base.update(hp_dict_update)
+            hp_dict_base=merge_dict(hp_dict_update,hp_dict_base)
         else :
             hp_dict_base = load_hparam(file_target)
         
