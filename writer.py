@@ -3,9 +3,9 @@ import torch
 from tensorboardX import SummaryWriter
 
 try : 
-    from .plotting import spec2plot,MFCC2plot,mag2plot
+    from .plotting import *
 except ImportError:
-    from plotting import spec2plot,MFCC2plot,mag2plot
+    from plotting import *
 
 # https://pytorch.org/docs/stable/tensorboard.html
 
@@ -77,6 +77,14 @@ class MyWriter(SummaryWriter):
         clean = torch.stft(clean,n_fft=self.hp.audio.frame, hop_length = self.hp.audio.shift, window = self.window, center = True, normalized=False, onesided=True)
 
         self.log_spec(noisy,estim,clean,step)
+    
+    """
+    data : 
+        (9, n_sample) == [noisy, target 0 ~ target 3, output 0 ~ output 3]
+    """
+    def log_DOA_wav(self,data,step,label="Output"):
+        image = wav2plotDOA(data)
+        self.add_image(label,image,step)
 
 def check_MFCC():
     from hparams import HParam
