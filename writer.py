@@ -25,8 +25,8 @@ class MyWriter(SummaryWriter):
     def log_test(self,test_loss,step) : 
         self.add_scalar('test_loss', test_loss, step)
 
-    def log_audio(self,wav,label='label',step=0) : 
-        self.add_audio(label, wav, step, 16000)
+    def log_audio(self,wav,label='label',step=0,sr=16000) : 
+        self.add_audio(label, wav, step, sr)
 
     def log_MFCC(self,input,output,clean,step):
         input = input.to('cpu')
