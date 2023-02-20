@@ -10,10 +10,13 @@ except ImportError:
 # https://pytorch.org/docs/stable/tensorboard.html
 
 class MyWriter(SummaryWriter):
-    def __init__(self, hp, logdir):
+    def __init__(self, logdir, n_fft=512,n_hop=128):
         super(MyWriter, self).__init__(logdir)
-        self.hp = hp
-        self.window = torch.hann_window(window_length=512, periodic=True,
+
+        self.n_fft = n_fft
+        self.n_hop = n_hop
+
+        self.window = torch.hann_window(window_length=n_fft, periodic=True,
                                dtype=None, layout=torch.strided, device=None,
                                requires_grad=False)
     def log_value(self, train_loss, step,tag):
@@ -26,6 +29,7 @@ class MyWriter(SummaryWriter):
         self.add_scalar('test_loss', test_loss, step)
 
     def log_audio(self,wav,label='label',step=0,sr=16000) : 
+        wav = wav/np.max(np.abs(wav))
         self.add_audio(label, wav, step, sr)
 
     def log_MFCC(self,input,output,clean,step):
@@ -72,9 +76,9 @@ class MyWriter(SummaryWriter):
         estim = torch.from_numpy(estim)
         clean = torch.from_numpy(clean)
 
-        noisy = torch.stft(noisy,n_fft=self.hp.audio.frame, hop_length = self.hp.audio.shift, window = self.window, center = True, normalized=False, onesided=True)
-        estim = torch.stft(estim,n_fft=self.hp.audio.frame, hop_length = self.hp.audio.shift, window = self.window, center = True, normalized=False, onesided=True)
-        clean = torch.stft(clean,n_fft=self.hp.audio.frame, hop_length = self.hp.audio.shift, window = self.window, center = True, normalized=False, onesided=True)
+        noisy = torch.stft(noisy,n_fft=self.n_fft, hop_length = self.n_hop, window = self.window, center = True, normalized=False, onesided=True)
+        estim = torch.stft(estim,n_fft=self.n_fft, hop_length = self.n_hop, window = self.window, center = True, normalized=False, onesided=True)
+        clean = torch.stft(clean,n_fft=self.n_fft, hop_length = self.n_hop, window = self.window, center = True, normalized=False, onesided=True)
 
         self.log_spec(noisy,estim,clean,step)
     
@@ -86,51 +90,6 @@ class MyWriter(SummaryWriter):
         image = wav2plotDOA(data)
         self.add_image(label,image,step)
 
-def check_MFCC():
-    from hparams import HParam
-    ## log MFCC test
-    hp = HParam("../../config/TEST.yaml")
-    log_dir = '/home/nas/user/kbh/MCFE/'+'/'+'log'+'/'+'TEST'
-
-    writer = MyWriter(hp, log_dir)
-
-    input = torch.load('input.pt').to('cpu')
-    clean = torch.load('clean.pt').to('cpu')
-    output = torch.load('output.pt').to('cpu')
-
-    print('input : ' + str(input.shape))
-    print('output : ' + str(output.shape))
-
-    noisy = input[0]
-    estim = input[1]
-
-    noisy = noisy.detach().numpy()
-    estim = estim.detach().numpy()
-    output = output.detach().numpy()
-    clean= clean.detach().numpy()
-
-
-    output = np.expand_dims(output,0)
-    clean = np.expand_dims(clean,0)
-
-    print(noisy.shape)
-    print(estim.shape)
-    print(output.shape)
-    print(clean.shape)
-
-    noisy = MFCC2plot(noisy)
-    estim = MFCC2plot(estim)
-    output = MFCC2plot(output)
-    clean = MFCC2plot(clean)
-
-    print('MFCC')
-    print(noisy.shape)
-    print(estim.shape)
-    print(output.shape)
-    print(clean.shape)
-
-    writer.log_MFCC(noisy,estim,output,clean,0)
-
 if __name__=='__main__':
-    check_MFCC()
+    MyWriter()
 

@@ -6,6 +6,7 @@ from matplotlib import cm
 import io
 import PIL.Image
 from torchvision.transforms import ToTensor
+import librosa as rs
 
 def fig2np(fig):
     data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
@@ -26,12 +27,26 @@ def MFCC2plot(MFCC):
 
 def spec2plot(data,normalized=True):
     data = data.detach().cpu().numpy()
-    # if not in magnitude
-    if np.shape(data)[-1] == 2 :
-        mag = np.power(data[:,:,0],2) + np.power(data[:,:,1],2)
-    else :
+    n_shape = len(data.shape)
+
+
+    # [ l ] -> wav
+    if n_shape == 1 :
+        data = rs.stft(data,n_fft = 512)
+        mag= np.abs(data)
+    # [2, F, T] -> spec
+    elif data.shape[0] == 2 :
+        data = data[0] + data[1]*1j
+        mag = np.abs(data)
+    # or [F, T] with complex
+    elif np.iscomplex(data).any() : 
+        mag = np.abs(data)
+    else : 
         mag = data
+    # data is mag
+
     np.seterr(divide = 'warn') 
+
     mag = 10*np.log(mag)
     fig, ax = plt.subplots()
     im = plt.imshow(mag, cmap=cm.jet, aspect='auto',origin='lower')

@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import librosa
 
 """
@@ -39,6 +40,8 @@ def wSDRLoss(output,noisy,target,alpha=0.01,inSTFT=True,eps=2e-7):
         noise = noisy - target
         noise_est = noisy - output
 
+        if alpha == -1 : 
+            alpha = torch.sum(torch.pow(target,2)) / (torch.sum(torch.pow(target,2)) + torch.sum(torch.pow(noise,2))+ eps)
         wSDR = alpha * mSDRLoss(output,target,eps=eps) + (1-alpha)*mSDRLoss(noise_est,noise,eps=eps)
         return wSDR
 
@@ -71,6 +74,51 @@ def wMSELoss(output,target,alpha=0.9,eps=1e-13):
     d = s_mag - s_hat_mag
 
     return torch.mean(alpha*(d + d.abs())/2 + (1-alpha) * (d-d.abs()).abs()/2)
+
+
+"""
+    Mel-domain Weighted Error
+    output : STFT [B,F,T]
+    target : STFT [B,F,T]
+"""
+
+mel_basis = None
+
+def mwMSELoss(output,target,alpha=0.99,eps=1e-7,sr=16000,n_fft=512,device="cuda:0"):
+    global mel_basis
+
+    if mel_basis is None :
+        mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft,n_mels=40)
+        mel_basis = torch.from_numpy(mel_basis)
+        mel_basis = mel_basis.to(device)
+
+    # ERROR : weight becomes NAN
+    # --> torch backpropagation weight clipping on 'sqrt'
+    #    --> omitted 'sqrt'
+    #s_mag = torch.sqrt(target[:,:,:,0]**2 + target[:,:,:,1]**2)
+    #s_hat_mag = torch.sqrt(output[:,:,:,0]**2 + output[:,:,:,1]**2)
+
+    # add eps due to 'MmBackward nan' error in gradient
+    s_hat_mag = torch.abs(output) + eps
+    s_mag = torch.abs(target) + eps
+
+    # scale
+    s_mag= torch.log10(1+s_mag)
+    s_hat_mag= torch.log10(1+s_hat_mag)
+
+    # mel
+    s = torch.matmul(mel_basis,s_mag)
+    s_hat = torch.matmul(mel_basis,s_hat_mag)
+
+    # Batch Norm
+    s_mag = s_mag/torch.max(s_mag)
+    s_hat_mag = s_hat_mag/torch.max(s_hat_mag)
+
+    d = s - s_hat
+
+    mwMSE = torch.mean(alpha *(d + d.abs())/2 + (1-alpha) * (d-d.abs()).abs()/2)
+
+    return  mwMSE
 
 class LossBundle:
     def __init__(self,hp,device):
@@ -319,8 +367,3 @@ class LossBundle:
         l = beta*self.mwMSE(spec_output,spec_target) + (1-beta)*self.iSDRLoss(wav_output,wav_target,inSTFT=False)
 
         return l
-
-        
-
-
-    
