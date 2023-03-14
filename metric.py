@@ -1,6 +1,7 @@
 import pesq
 import torch
 import numpy as np
+from pystoi.stoi import stoi
 
 """
     output : wav[n_target,n_sample]
@@ -34,13 +35,15 @@ def SIR(estim,target, requires_grad=False,device="cuda:0") :
     for i in range(n_target) : 
         SIR += (torch.inner(s_target[i],s_target[i]))/torch.inner(e_interf[i],e_interf[i])
     return 10*torch.log10(SIR)
-
 """
 
 """
 def PESQ(estim,target,fs=16000,mode="both") :
-    estim = estim.cpu().detach().numpy()
-    target = target.cpu().detach().numpy()
+
+    if torch.is_tensor(estim) : 
+        estim = estim.cpu().detach().numpy()
+    if torch.is_tensor(target) : 
+        target = target.cpu().detach().numpy()
 
     if mode =="wb" : 
         val_pesq = pesq.pesq(fs, target, estim, 'wb',on_error=pesq.PesqError.RETURN_VALUES)
@@ -51,3 +54,19 @@ def PESQ(estim,target,fs=16000,mode="both") :
         val_pesq += pesq.pesq(fs,target,estim,'nb',on_error=pesq.PesqError.RETURN_VALUES)
         val_pesq /= 2
     return val_pesq
+
+def STOI(estim,target,fs=16000,mode="both") :
+
+    if torch.is_tensor(estim) : 
+        estim = estim.cpu().detach().numpy()
+    if torch.is_tensor(target) : 
+        target = target.cpu().detach().numpy()
+
+    return stoi(target, estim, fs, extended=False)
+
+
+def run_metric(estim,target,method,fs=16000):
+
+
+    val = globals()[method](estim,target,fs)
+    return val

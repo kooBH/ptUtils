@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import librosa
 
+EPS=1e-7
 """
 SI-SDR(Scale Invariant Source-to-Distortion Ratio)
 == SI-SNR
@@ -367,3 +368,122 @@ class LossBundle:
         l = beta*self.mwMSE(spec_output,spec_target) + (1-beta)*self.iSDRLoss(wav_output,wav_target,inSTFT=False)
 
         return l
+
+"""
+
+"""
+class CosSDRLossSegment(nn.Module):
+    """
+    It's a cosine similarity between predicted and clean signal
+        loss = - <y_true, y_pred> / (||y_true|| * ||y_pred||)
+    This loss function is always bounded between -1 and 1
+    Ref: https://openreview.net/pdf?id=SkeRTsAcYm
+    Hyeong-Seok Choi et al., Phase-aware Speech Enhancement with Deep Complex U-Net,
+    """
+    def __init__(self, reduction=torch.mean):
+        super(CosSDRLossSegment, self).__init__()
+        self.reduction = reduction
+
+    def forward(self, output, target, out_dict=True):
+        num = torch.sum(target * output, dim=-1)
+        den = torch.norm(target, dim=-1) * torch.norm(output, dim=-1)
+        loss_per_element = -num / (den + EPS)
+        loss = self.reduction(loss_per_element)
+        return {"CosSDRLossSegment": loss} if out_dict else loss
+
+class CosSDRLoss(nn.Module):
+    def __init__(self, reduction=torch.mean):
+        super(CosSDRLoss, self).__init__()
+        self.segment_loss = CosSDRLossSegment(nn.Identity())
+        self.reduction = reduction
+
+    def forward(self, output, target, chunk_size=1024, out_dict=True):
+        out_chunks = torch.reshape(output, [output.shape[0], -1, chunk_size])
+        trg_chunks = torch.reshape(target, [target.shape[0], -1, chunk_size])
+        loss_per_element = torch.mean(
+            self.segment_loss(out_chunks, trg_chunks, False), dim=-1
+        )
+        loss = self.reduction(loss_per_element)
+        return {"CosSDRLoss": loss} if out_dict else loss
+
+class MultiscaleCosSDRLoss(nn.Module):
+    def __init__(self, chunk_sizes, reduction=torch.mean):
+        super(MultiscaleCosSDRLoss, self).__init__()
+        self.chunk_sizes = chunk_sizes
+        self.loss = CosSDRLoss(nn.Identity())
+        self.reduction = reduction
+
+    def forward(self, output, target, out_dict=True):
+        loss_per_scale = [
+            self.loss(output, target, cs, False) for cs in self.chunk_sizes
+        ]
+        loss_per_element = torch.mean(torch.stack(loss_per_scale), dim=0)
+        loss = self.reduction(loss_per_element)
+        return {"MultiscaleCosSDRLoss": loss} if out_dict else loss
+
+
+class SpectrogramLoss(nn.Module):
+    def __init__(self, reduction=torch.mean):
+        super(SpectrogramLoss, self).__init__()
+        self.gamma = 0.3
+        self.reduction = reduction
+
+    def forward(self, output, target, chunk_size=1024, out_dict=True):
+        # stft.shape == (batch_size, fft_size, num_chunks)
+        stft_output = torch.stft(output, chunk_size, hop_length=chunk_size//4, return_complex=True, center=False)
+        stft_target = torch.stft(target, chunk_size, hop_length=chunk_size//4, return_complex=True, center=False)
+
+        # clip is needed to avoid nan gradients in the backprop
+        mag_output = torch.clip(torch.abs(stft_output), min=EPS)
+        mag_target = torch.clip(torch.abs(stft_target), min=EPS)
+        distance = mag_target**self.gamma - mag_output**self.gamma
+
+        # average out
+        loss_per_chunk = torch.mean(distance**2, dim=1)
+        loss_per_element = torch.mean(loss_per_chunk, dim=-1)
+        loss = self.reduction(loss_per_element)
+        return {"SpectrogramLoss": loss} if out_dict else loss
+
+class MultiscaleSpectrogramLoss(nn.Module):
+    def __init__(self, chunk_sizes, reduction=torch.mean):
+        super(MultiscaleSpectrogramLoss, self).__init__()
+        self.chunk_sizes = chunk_sizes
+        self.loss = SpectrogramLoss(nn.Identity())
+        self.reduction = reduction
+
+    def forward(self, output, target, out_dict=True):
+        loss_per_scale = [
+            self.loss(output, target, cs, False) for cs in self.chunk_sizes
+        ]
+        loss_per_element = torch.mean(torch.stack(loss_per_scale), dim=0)
+        loss = self.reduction(loss_per_element)
+        return {"MultiscaleSpectrogramLoss": loss} if out_dict else loss
+
+class TrunetLoss(nn.Module):
+    def __init__(self, frame_size_sdr=[4096, 2048, 1024, 512], frame_size_spec=[1024, 512, 256]):
+        super(TrunetLoss, self).__init__()
+
+        self.max_size = max(max(frame_size_sdr), max(frame_size_spec))
+
+        self.sdr_loss = MultiscaleCosSDRLoss(frame_size_sdr)
+        self.spc_loss = MultiscaleSpectrogramLoss(frame_size_spec)
+
+    def forward(self, outputs, targets, out_dict=False):
+        # shape: (batch_size, direct_or_reverberant, num_samples)
+        yd = outputs
+        td = targets
+
+        if yd % self.max_size != 0:
+            yd = yd[..., : -(yd.shape[-1] % self.max_size)]
+            td = td[..., : -(td.shape[-1] % self.max_size)]
+
+        # d=direct, r=reverberant; reverb = reverberant - direct
+        # fmt: off
+        losses = {
+            "MultiscaleSpectrogramLoss_Direct":      self.spc_loss(yd, td, out_dict=False),
+            "MultiscaleCosSDRWavLoss_Direct":        self.sdr_loss(yd, td, out_dict=False),
+        }
+        # fmt: on
+        return (
+            losses if out_dict else torch.sum(torch.stack([v for v in losses.values()]))
+        )
