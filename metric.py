@@ -64,9 +64,37 @@ def STOI(estim,target,fs=16000,mode="both") :
 
     return stoi(target, estim, fs, extended=False)
 
+def SNR(estim,target, requires_grad=False,device="cuda:0") :
+    if estim.shape != target.shape : 
+        raise Exception("ERROR::metric.py::SIR:: output shape != target shape | {} != {}".format(output.shape,target.shape))
+
+    if len(estim.shape) != 2 : 
+        raise Exception("ERROR::metric.py::SIR:: output dim {} != 2".format(len(output.shape)))
+    n_target  = estim.shape[0]
+    
+    s_target = []
+    e_noise= []
+
+    for i in range(n_target) : 
+        s_target.append(torch.inner(estim[i],target[i])*target[i]/torch.inner(target[i],target[i]))
+
+        tmp = None
+        for j in range(n_target) : 
+            if i == j :
+                continue
+            if tmp is None : 
+                tmp = estim - s_target 
+            else : 
+                tmp = estim - s_target
+        e_noise.append(tmp)
+
+    SNR =  torch.tensor(0.0, requires_grad=requires_grad).to(device)
+    for i in range(n_target) : 
+        SNR += (torch.inner(s_target[i],s_target[i]))/torch.inner(e_noise[i],e_noise[i])
+    return 10*torch.log10(SNR)
+
 
 def run_metric(estim,target,method,fs=16000):
-
 
     val = globals()[method](estim,target,fs)
     return val
