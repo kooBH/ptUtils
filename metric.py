@@ -39,7 +39,6 @@ def SIR(estim,target, requires_grad=False,device="cuda:0") :
 
 """
 def PESQ(estim,target,fs=16000,mode="both") :
-
     if torch.is_tensor(estim) : 
         estim = estim.cpu().detach().numpy()
     if torch.is_tensor(target) : 

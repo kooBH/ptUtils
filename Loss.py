@@ -456,7 +456,7 @@ class MultiscaleSpectrogramLoss(nn.Module):
             self.loss(output, target, cs, False) for cs in self.chunk_sizes
         ]
         loss_per_element = torch.mean(torch.stack(loss_per_scale), dim=0)
-        loss = self.reduction(loss_per_element)
+        loss = 15*self.reduction(loss_per_element)
         return {"MultiscaleSpectrogramLoss": loss} if out_dict else loss
 
 class TrunetLoss(nn.Module):
@@ -487,3 +487,43 @@ class TrunetLoss(nn.Module):
         return (
             losses if out_dict else torch.sum(torch.stack([v for v in losses.values()]))
         )
+    
+class LevelInvariantNormalizedLoss(nn.Module) : 
+    """
+    Braun, Sebastian, and Ivan Tashev. "Data augmentation and loss normalization for deep noise suppression." 
+    Speech and Computer: 22nd International Conference, SPECOM 2020, 
+    St. Petersburg, Russia, October 7–9, 2020, Proceedings 22. Springer International Publishing, 2020.
+    """
+    def __init__(self,alpha = 0.3, c = 0.3, n_fft = 512):
+        super(LevelInvariantNormalizedLoss, self).__init__()
+        self.n_fft = n_fft
+        self.window = torch.hann_window(n_fft)
+        self.alpha = alpha
+        self.c = c
+        self.MSE = torch.nn.MSELoss()
+        
+    def forward(self,output,target):
+        # Normalize
+        
+        # STFT
+        Y = torch.stft(output,self.n_fft,return_complex=True,center=False,window=self.window.to(output.device))
+        S = torch.stft(target,self.n_fft,return_complex=True,center=False,window=self.window.to(output.device))
+        
+        # Compress
+        mag_Y = torch.pow(torch.abs(Y),self.c)
+        mag_S = torch.pow(torch.abs(S),self.c)
+        
+        # Complex
+        phase_Y = torch.exp(1j*torch.angle(Y))
+        phase_S = torch.exp(1j*torch.angle(S))
+        
+        # Complex MSE is not implemented
+        cL = ((torch.abs(mag_Y*phase_Y - mag_S*phase_S))**2).mean()
+        
+        mL = self.MSE(mag_Y,mag_S)
+        # Loss
+        L = self.alpha*cL + (1-self.alpha)*mL
+
+
+        
+        return L

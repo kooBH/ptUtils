@@ -11,7 +11,7 @@ except ImportError:
 
 class MyWriter(SummaryWriter):
     def __init__(self, logdir, n_fft=512,n_hop=128):
-        super(MyWriter, self).__init__(logdir)
+        super(MyWriter, self).__init__(logdir,flush_secs=1)
 
         self.n_fft = n_fft
         self.n_hop = n_hop

@@ -17,13 +17,16 @@ def load_hparam(filename):
             hparam_dict[k] = v
     return hparam_dict
 
-def merge_dict(user, default):
+def merge_dict(user, default,merge_except=[]):
     if isinstance(user, dict) and isinstance(default, dict):
         for k, v in default.items():
+            if k in merge_except : 
+                continue
+
             if k not in user:
                 user[k] = v
             else:
-                user[k] = merge_dict(user[k], v)
+                user[k] = merge_dict(user[k], v,merge_except)
     return user
 
 class Dotdict(dict):
@@ -47,13 +50,13 @@ class Dotdict(dict):
 
 class HParam(Dotdict):
 
-    def __init__(self, file_target, file_default=None):
+    def __init__(self, file_target, file_default=None,merge_except=[]):
         super(Dotdict, self).__init__()
         
         if file_default is not None : 
             hp_dict_base = load_hparam(file_default)
             hp_dict_update = load_hparam(file_target)
-            hp_dict_base=merge_dict(hp_dict_update,hp_dict_base)
+            hp_dict_base=merge_dict(hp_dict_update,hp_dict_base,merge_except)
         else :
             hp_dict_base = load_hparam(file_target)
         
