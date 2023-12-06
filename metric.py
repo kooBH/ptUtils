@@ -229,7 +229,7 @@ class SigMOS_singleton(object):
 
         if sr is not None and sr != self.sampling_rate:
             audio = rs.resample(audio, orig_sr=sr, target_sr=self.sampling_rate, res_type=self.resample_type)
-            print(f"Audio file resampled from {sr} to {self.sampling_rate}!")
+            #print(f"Audio file resampled from {sr} to {self.sampling_rate}!")
 
         features = self.stft(audio)
         features = self.compressed_mag_complex(features)
