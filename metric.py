@@ -65,31 +65,17 @@ def STOI(estim,target,fs=16000,mode="both") :
 
 def SNR(estim,target, requires_grad=False,device="cuda:0") :
     if estim.shape != target.shape : 
-        raise Exception("ERROR::metric.py::SIR:: output shape != target shape | {} != {}".format(output.shape,target.shape))
-
-    if len(estim.shape) != 2 : 
-        raise Exception("ERROR::metric.py::SIR:: output dim {} != 2".format(len(output.shape)))
-    n_target  = estim.shape[0]
+        raise Exception("ERROR::metric.py::SIR:: output shape != target shape | {} != {}".format(estim.shape,target.shape))
     
-    s_target = []
-    e_noise= []
+    estim = torch.Tensor(estim)
+    target = torch.Tensor(target)
 
-    for i in range(n_target) : 
-        s_target.append(torch.inner(estim[i],target[i])*target[i]/torch.inner(target[i],target[i]))
+    s_target = (torch.inner(estim,target)*target/torch.inner(target,target))
 
-        tmp = None
-        for j in range(n_target) : 
-            if i == j :
-                continue
-            if tmp is None : 
-                tmp = estim - s_target 
-            else : 
-                tmp = estim - s_target
-        e_noise.append(tmp)
+    tmp = estim - s_target 
+    e_noise = (tmp)
 
-    SNR =  torch.tensor(0.0, requires_grad=requires_grad).to(device)
-    for i in range(n_target) : 
-        SNR += (torch.inner(s_target[i],s_target[i]))/torch.inner(e_noise[i],e_noise[i])
+    SNR = (torch.inner(s_target,s_target))/torch.inner(e_noise,e_noise)
     return 10*torch.log10(SNR)
 
 
