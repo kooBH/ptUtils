@@ -463,6 +463,7 @@ class TrunetLoss(nn.Module):
     def __init__(self, frame_size_sdr=[4096, 2048, 1024, 512], frame_size_spec=[1024, 512, 256]):
         super(TrunetLoss, self).__init__()
 
+        
         self.max_size = max(max(frame_size_sdr), max(frame_size_spec))
 
         self.sdr_loss = MultiscaleCosSDRLoss(frame_size_sdr)
@@ -473,7 +474,7 @@ class TrunetLoss(nn.Module):
         yd = outputs
         td = targets
 
-        if yd % self.max_size != 0:
+        if yd.shape[1]% self.max_size != 0:
             yd = yd[..., : -(yd.shape[-1] % self.max_size)]
             td = td[..., : -(td.shape[-1] % self.max_size)]
 

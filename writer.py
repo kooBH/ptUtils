@@ -10,11 +10,12 @@ except ImportError:
 # https://pytorch.org/docs/stable/tensorboard.html
 
 class MyWriter(SummaryWriter):
-    def __init__(self, logdir, n_fft=512,n_hop=128):
+    def __init__(self, logdir, n_fft=512,n_hop=128,sr=16000):
         super(MyWriter, self).__init__(logdir,flush_secs=1)
 
         self.n_fft = n_fft
         self.n_hop = n_hop
+        self.sr = sr
 
         self.window = torch.hann_window(window_length=n_fft, periodic=True,
                                dtype=None, layout=torch.strided, device=None,
@@ -28,10 +29,10 @@ class MyWriter(SummaryWriter):
     def log_test(self,test_loss,step) : 
         self.add_scalar('test_loss', test_loss, step)
 
-    def log_audio(self,wav,label='label',step=0,sr=16000) : 
+    def log_audio(self,wav,label='label',step=0) : 
         wav = wav.detach().cpu().numpy()
         wav = wav/np.max(np.abs(wav))
-        self.add_audio(label, wav, step, sr)
+        self.add_audio(label, wav, step, self.sr)
 
     def log_MFCC(self,input,output,clean,step):
         input = input.to('cpu')
