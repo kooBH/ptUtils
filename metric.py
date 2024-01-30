@@ -80,6 +80,15 @@ def SNR(estim,target, requires_grad=False,device="cuda:0") :
     SNR = (torch.inner(s_target,s_target))/torch.inner(e_noise,e_noise)
     return 10*torch.log10(SNR)
 
+"""
+Equivalent to SDR
+"""
+def SDR(estim,target,requires_grad=False,device="cuda:0"):
+    return SNR(estim,target,requires_grad,device)
+
+def SISDR(estim,target,requires_grad=False,device="cuda:0"):
+    return SNR(estim,target,requires_grad,device)
+
 
 class DNSMOS_singleton(object):
     def __new__(cls, primary_model_path,sr=16000):
@@ -163,10 +172,14 @@ class DNSMOS_singleton(object):
         clip_dict['BAK'] = np.mean(predicted_mos_bak_seg)
         return clip_dict
     
-def DNSMOS(estim,target,fs=16000):
+def DNSMOS(estim,target,fs=16000, ret_all = False):
     model = DNSMOS_singleton(os.path.dirname(os.path.abspath(__file__))+"/sig_bak_ovr.onnx",fs)
     clip_dict = model(estim, input_fs=fs)
-    return [clip_dict['OVRL'],clip_dict['SIG'],clip_dict['BAK']]
+    if ret_all : 
+        return [clip_dict['OVRL'],clip_dict['SIG'],clip_dict['BAK']]
+    else :
+        return clip_dict["OVRL"]
+
 
 
 
@@ -237,18 +250,22 @@ class SigMOS_singleton(object):
         output = self.session.run(None, onnx_inputs)[0][0]
 
         result = {
-            'MOS_COL': float(output[0]), 'MOS_DISC': float(output[1]), 'MOS_LOUD': float(output[2]),
-            'MOS_NOISE': float(output[3]), 'MOS_REVERB': float(output[4]), 'MOS_SIG': float(output[5]),
-            'MOS_OVRL': float(output[6])
-        }
+                'MOS_COL': float(output[0]), 'MOS_DISC': float(output[1]), 'MOS_LOUD': float(output[2]),
+                'MOS_NOISE': float(output[3]), 'MOS_REVERB': float(output[4]), 'MOS_SIG': float(output[5]),
+                'MOS_OVRL': float(output[6])
+            }
         return result
     
-def SigMOS(estim,target,fs=16000): 
+def SigMOS(estim,target,fs=16000, ret_all = False): 
     model = SigMOS_singleton()
     if torch.is_tensor(estim) : 
         estim = estim.cpu().detach().numpy()
     clip_dict = model.run(estim, sr=fs)
-    return [clip_dict['MOS_OVRL'],clip_dict['MOS_SIG'],clip_dict['MOS_NOISE'],clip_dict['MOS_REVERB'],clip_dict['MOS_DISC'],clip_dict['MOS_LOUD'],clip_dict['MOS_COL']]
+
+    if ret_all : 
+        return [clip_dict['MOS_OVRL'],clip_dict['MOS_SIG'],clip_dict['MOS_NOISE'],clip_dict['MOS_REVERB'],clip_dict['MOS_DISC'],clip_dict['MOS_LOUD'],clip_dict['MOS_COL']]
+    else :
+        return clip_dict["MOS_OVRL"]
 
 
 def run_metric(estim,target,method,fs=16000):
