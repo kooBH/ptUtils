@@ -57,6 +57,12 @@ def PESQ(estim,target,fs=16000,mode="both") :
         val_pesq /= 2
     return val_pesq
 
+def PESQ_WB(estim,target,fs=16000) :
+    return PESQ(estim,target,fs,"wb")
+
+def PESQ_NB(estim,target,fs=16000) :
+    return PESQ(estim,target,fs,"nb")
+
 def STOI(estim,target,fs=16000,mode="both") :
 
     if torch.is_tensor(estim) : 
