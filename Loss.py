@@ -84,14 +84,24 @@ def wMSELoss(output,target,alpha=0.9,eps=1e-13):
 """
 
 mel_basis = None
+hann = None
 
 def mwMSELoss(output,target,alpha=0.99,eps=1e-7,sr=16000,n_fft=512,device="cuda:0"):
     global mel_basis
+    global hann
+    # output : [B,L]
+    # target : [B,L]
 
     if mel_basis is None :
         mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft,n_mels=40)
         mel_basis = torch.from_numpy(mel_basis)
         mel_basis = mel_basis.to(device)
+
+    if hann is None :
+        hann = torch.hann_window(n_fft,device=device,requires_grad=False)
+
+    output = torch.stft(output, n_fft, window=hann,return_complex=True)
+    target = torch.stft(target, n_fft, window=hann,return_complex=True)
 
     # ERROR : weight becomes NAN
     # --> torch backpropagation weight clipping on 'sqrt'
@@ -459,6 +469,7 @@ class MultiscaleSpectrogramLoss(nn.Module):
         loss = 15*self.reduction(loss_per_element)
         return {"MultiscaleSpectrogramLoss": loss} if out_dict else loss
 
+# Mutliscale Loss
 class TrunetLoss(nn.Module):
     def __init__(self, frame_size_sdr=[4096, 2048, 1024, 512], frame_size_spec=[1024, 512, 256]):
         super(TrunetLoss, self).__init__()
