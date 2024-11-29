@@ -380,7 +380,7 @@ class LossBundle:
         return l
 
 """
-
+weighted-SDR loss
 """
 class CosSDRLossSegment(nn.Module):
     """
@@ -529,6 +529,7 @@ class MultiscaleAntiWrappingLoss(nn.Module):
         return loss
 
 
+
 class MultiMagnitudeLoss(nn.Module):
     def __init__(self,
                  n_fft=512,
@@ -587,6 +588,76 @@ class MultiMagnitudeLoss(nn.Module):
         
         loss = self.weight[0]*m10_loss + self.weight[1]*m20_loss + self.weight[2]*m30_loss
         return loss
+
+"""
+SA-SNR
+Li, Yihao, Meng Sun, and Xiongwei Zhang. "Scale-aware dual-branch complex convolutional recurrent network for monaural speech enhancement." Computer Speech & Language 86 (2024): 101618.
+"""
+class SASNRLossSegment(nn.Module):
+    def __init__(self, reduction=torch.mean):
+        super(SASNRLossSegment, self).__init__()
+        self.reduction = reduction
+
+    def forward(self, output, target, out_dict=True):
+
+        # (9)
+        numer_s = torch.dot(output, target)
+        denom_s = torch.norm(target) ** 2
+        s_target = (numer_s/denom_s) * target
+
+        # (10)
+        e_noise = output - s_target
+
+        (14)
+        # Compute norms
+        norm_s_target_squared = torch.sum(s_target ** 2, dim=1)  
+        norm_e_noise_squared = torch.sum(e_noise ** 2, dim=1)  
+        norm_predicted = torch.norm(predicted, dim=1)  
+        norm_target = torch.norm(target, dim=1) 
+
+        # Scaling factors
+        scaling_factor = norm_predicted / norm_target
+        min_factor = torch.minimum(scaling_factor, torch.ones_like(scaling_factor))
+        max_factor = torch.maximum(scaling_factor, torch.ones_like(scaling_factor))
+        scale_term = min_factor / max_factor
+
+        # Compute SA-SNR loss
+        ratio = norm_s_target_squared / (norm_e_noise_squared + EPS)  
+        loss_per_element = -10 * torch.log10(ratio * scale_term + EPS)  
+
+        loss = self.reduction(loss_per_element)
+        return {"SASNRLossSegment": loss} if out_dict else loss
+
+class SASNRLoss(nn.Module):
+    def __init__(self, reduction=torch.mean):
+        super(SASNRLoss, self).__init__()
+        self.segment_loss = SASNRLossSegment(nn.Identity())
+        self.reduction = reduction
+
+    def forward(self, output, target, chunk_size=1024, out_dict=True):
+        out_chunks = torch.reshape(output, [output.shape[0], -1, chunk_size])
+        trg_chunks = torch.reshape(target, [target.shape[0], -1, chunk_size])
+        loss_per_element = torch.mean(
+            self.segment_loss(out_chunks, trg_chunks, False), dim=-1
+        )
+        loss = self.reduction(loss_per_element)
+        return {"SASNRLoss": loss} if out_dict else loss
+
+class MultiscaleSASNRLoss(nn.Module):
+    def __init__(self, chunk_sizes, reduction=torch.mean):
+        super(MultiscaleSASNRLoss, self).__init__()
+        self.chunk_sizes = chunk_sizes
+        self.loss = SASNRLoss(nn.Identity())
+        self.reduction = reduction
+
+    def forward(self, output, target, out_dict=True):
+        loss_per_scale = [
+            self.loss(output, target, cs, False) for cs in self.chunk_sizes
+        ]
+        loss_per_element = torch.mean(torch.stack(loss_per_scale), dim=0)
+        loss = self.reduction(loss_per_element)
+        return {"MultiscaleSASNRLoss": loss} if out_dict else loss
+
 
 ################# Multi-Losses
 
@@ -662,10 +733,11 @@ class MultiLoss1(nn.Module):
 
 # Multi-loss 2
 class MultiLoss2(nn.Module):
-    def __init__(self, frame_size_sdr=[4096, 2048, 1024, 512], frame_size_spec=[1024, 512, 256], overlap=0.25,weight_spec=15):
+    def __init__(self, frame_size_sdr=[4096, 2048, 1024, 512], frame_size_spec=[1024, 512, 256], overlap=0.25,weight_spec=15,weight_sdr = 1):
         super(MultiLoss2, self).__init__()
 
         self.weight_spec = weight_spec
+        self.weight_sdr = weight_sdr
         
         self.max_size = max(max(frame_size_sdr), max(frame_size_spec))
 
@@ -685,7 +757,7 @@ class MultiLoss2(nn.Module):
         # fmt: off
         losses = {
             "MultiscaleSpectrogramLoss_Direct":      self.weight_spec * self.spc_loss(yd, td, out_dict=False),
-            "MultiscaleCosSDRWavLoss_Direct":        self.sdr_loss(yd, td, out_dict=False),
+            "MultiscaleCosSDRWavLoss_Direct":        self.weight_sdr * self.sdr_loss(yd, td, out_dict=False),
         }
         # fmt: on
         return (
@@ -726,6 +798,38 @@ class MultiDecibelLoss(nn.Module):
         )
 
 
+# Multi-loss 4
+class MultiLoss4(nn.Module):
+    def __init__(self, frame_size_sdr=[4096, 2048, 1024, 512], frame_size_spec=[1024, 512, 256], overlap=0.25,weight_spec=1, weight_sdr = 1):
+        super(MultiLoss4, self).__init__()
+
+        self.weight_spec = weight_spec
+        self.weight_sdr = weight_sdr
+        
+        self.max_size = max(max(frame_size_sdr), max(frame_size_spec))
+
+        self.sdr_loss = MultiscaleSASNRLoss(frame_size_sdr)
+        self.spc_loss = MultiscaleSpectrogramLoss(frame_size_spec,overlap=overlap)
+
+    def forward(self, outputs, targets, out_dict=False):
+        # shape: (batch_size, direct_or_reverberant, num_samples)
+        yd = outputs
+        td = targets
+
+        if yd.shape[1]% self.max_size != 0:
+            yd = yd[..., : -(yd.shape[-1] % self.max_size)]
+            td = td[..., : -(td.shape[-1] % self.max_size)]
+
+        # d=direct, r=reverberant; reverb = reverberant - direct
+        # fmt: off
+        losses = {
+            "MultiscaleSpectrogramLoss_Direct":      self.weight_spec * self.spc_loss(yd, td, out_dict=False),
+            "MultiscaleSASNRLoss_Direct":        self.weight_sdr * self.sdr_loss(yd, td, out_dict=False),
+        }
+        # fmt: on
+        return (
+            losses if out_dict else torch.sum(torch.stack([v for v in losses.values()]))
+        )
 
     
 class LevelInvariantNormalizedLoss(nn.Module) : 
