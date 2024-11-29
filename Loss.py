@@ -431,17 +431,33 @@ class MultiscaleCosSDRLoss(nn.Module):
         loss = self.reduction(loss_per_element)
         return {"MultiscaleCosSDRLoss": loss} if out_dict else loss
 
-
 class SpectrogramLoss(nn.Module):
-    def __init__(self, reduction=torch.mean):
+    def __init__(self, reduction=torch.mean,overlap=0.25):
         super(SpectrogramLoss, self).__init__()
         self.gamma = 0.3
         self.reduction = reduction
 
+        if overlap == 0.5 : 
+            self.denom = 2
+        else :
+            self.denom = 4
+
+        self.windows = {}
+
     def forward(self, output, target, chunk_size=1024, out_dict=True):
+        
+        if "{}".format(chunk_size) in self.windows.keys() : 
+            window = self.windows["{}".format(chunk_size)]
+        else :
+            window = torch.zeros(chunk_size)
+            for i in range(chunk_size):
+                window[i] = torch.sin(torch.tensor(3.14159265358979323846 * (i + 0.5) / chunk_size))
+            window = window.to(output.device)
+            self.windows["{}".format(chunk_size)] = window
+
         # stft.shape == (batch_size, fft_size, num_chunks)
-        stft_output = torch.stft(output, chunk_size, hop_length=chunk_size//4, return_complex=True, center=False)
-        stft_target = torch.stft(target, chunk_size, hop_length=chunk_size//4, return_complex=True, center=False)
+        stft_output = torch.stft(output, chunk_size, hop_length=chunk_size//self.denom, return_complex=True, center=False,window = window)
+        stft_target = torch.stft(target, chunk_size, hop_length=chunk_size//self.denom, return_complex=True, center=False, window = window)
 
         # clip is needed to avoid nan gradients in the backprop
         mag_output = torch.clip(torch.abs(stft_output), min=EPS)
@@ -455,10 +471,10 @@ class SpectrogramLoss(nn.Module):
         return {"SpectrogramLoss": loss} if out_dict else loss
 
 class MultiscaleSpectrogramLoss(nn.Module):
-    def __init__(self, chunk_sizes, reduction=torch.mean):
+    def __init__(self, chunk_sizes, reduction=torch.mean,overlap=0.25):
         super(MultiscaleSpectrogramLoss, self).__init__()
         self.chunk_sizes = chunk_sizes
-        self.loss = SpectrogramLoss(nn.Identity())
+        self.loss = SpectrogramLoss(nn.Identity(),overlap=overlap)
         self.reduction = reduction
 
     def forward(self, output, target, out_dict=True):
@@ -466,19 +482,123 @@ class MultiscaleSpectrogramLoss(nn.Module):
             self.loss(output, target, cs, False) for cs in self.chunk_sizes
         ]
         loss_per_element = torch.mean(torch.stack(loss_per_scale), dim=0)
-        loss = 15*self.reduction(loss_per_element)
+        loss = self.reduction(loss_per_element)
         return {"MultiscaleSpectrogramLoss": loss} if out_dict else loss
+
+"""
+Y. Ai and Z. -H. Ling, "Neural Speech Phase Prediction Based on Parallel Estimation Architecture and Anti-Wrapping Losses," ICASSP 2023 - 2023 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) , Rhodes Island, Greece, 2023, pp. 1-5, doi: 10.1109/ICASSP49357.2023.10096553.
+
+{f_{AW}}(x) = \left| {x - 2\pi \cdot round\left( {\frac{x}{{2\pi }}} \right)} \right|,x \in \mathbb{R}.
+
+{\mathcal{L}_{IP}} = {\mathbb{E}_{({\mathbf{\hat P}},{\mathbf{P}})}}\overline {{f_{AW}}({\mathbf{\hat P}} - {\mathbf{P}})} 
+
+ERROR::This makes weird behavior for data longer than training data
+"""
+class AntiWrappingLoss(nn.Module):
+    def __init__(self):
+        super(AntiWrappingLoss, self).__init__()
+    
+    def forward(self, output, target, chunk_size=1024, hop_length=None):
+        if hop_length is None : 
+            hop_length = chunk_size//4
+
+        # stft.shape == (batch_size, fft_size, num_chunks)
+        stft_output = torch.stft(output, chunk_size, hop_length=hop_length, return_complex=True, center=False)
+        stft_target = torch.stft(target, chunk_size, hop_length=hop_length, return_complex=True, center=False)
+
+        p_hat = torch.angle(stft_output)
+        p = torch.angle(stft_target)
+    
+        # (7)
+        error = torch.abs(p_hat - p - 2*torch.pi*torch.round((p_hat-p)/(2*torch.pi)))
+
+        # (8)
+        return torch.mean(error)        
+
+class MultiscaleAntiWrappingLoss(nn.Module):
+    def __init__(self, chunk_sizes) : 
+        super(MultiscaleAntiWrappingLoss, self).__init__()
+        self.chunk_sizes = chunk_sizes
+        self.loss = AntiWrappingLoss()
+
+    def forward(self, output, target, out_dict=True):
+        loss_per_scale = [
+            self.loss(output, target, cs) for cs in self.chunk_sizes
+        ]
+        loss = torch.mean(torch.stack(loss_per_scale), dim=0)
+        return loss
+
+
+class MultiMagnitudeLoss(nn.Module):
+    def __init__(self,
+                 n_fft=512,
+                 weight = [1.0,1.0,1.0],
+                 PC_factor=0.3,
+                 reduction = torch.mean,
+                 **kwargs) :
+        super(MultiMagnitudeLoss,self).__init__()
+        self.gamma = PC_factor
+        self.reduction = reduction
+        self.weight = weight
+        self.n_fft = n_fft
+
+    def stft_to_db(self, stft_data):
+        # STFT 도메인 데이터를 dB로 변환
+        magnitude = torch.abs(stft_data)
+        db_data = 20 * torch.log10(magnitude + 1e-10)  # 안정성을 위해 작은 값 추가
+        return db_data
+
+    # estim : (B,L) time domain audio
+    # target :(B,L) time domain audio
+    def forward(self, estim, target):
+        spec_estim = torch.stft(estim, n_fft = self.n_fft, return_complex=True)
+        spec_target = torch.stft(target, n_fft = self.n_fft, return_complex=True)
+
+        mag_estim = torch.abs(spec_estim)
+        mag_target = torch.abs(spec_target)
+
+        
+        db_target = self.stft_to_db(spec_target)
+        max_target = self.stft_to_db(torch.max(mag_target))
+        
+        m10_mask = db_target >= (max_target - 10)
+        m20_mask = (db_target >= (max_target - 20)) & (db_target < (max_target - 10))
+        m30_mask = (db_target < (max_target - 20))
+
+        zero_tensor = torch.tensor(1e-13, device=mag_estim.device, dtype=mag_estim.dtype, requires_grad=True)
+
+        m10_estim = torch.where(m10_mask, mag_estim, zero_tensor)
+        m20_estim = torch.where(m20_mask, mag_estim, zero_tensor)
+        m30_estim = torch.where(m30_mask, mag_estim, zero_tensor)
+
+        m10_target = torch.where(m10_mask, mag_target, zero_tensor)
+        m20_target = torch.where(m20_mask, mag_target, zero_tensor)
+        m30_target = torch.where(m30_mask, mag_target, zero_tensor)
+
+        m10_dist =  m10_target**self.gamma - m10_estim**self.gamma
+        m20_dist =  m20_target**self.gamma - m20_estim**self.gamma
+        m30_dist =  m30_target**self.gamma - m30_estim**self.gamma
+
+        m10_loss = self.reduction(torch.mean(m10_dist**2, dim=1)) + 1e-13
+        m20_loss = self.reduction(torch.mean(m20_dist**2, dim=1)) + 1e-13
+        m30_loss = self.reduction(torch.mean(m30_dist**2, dim=1)) + 1e-13
+                             
+        #print(f"{m10_loss:.8f} {m20_loss:.8f} {m30_loss:.8f}")
+        
+        loss = self.weight[0]*m10_loss + self.weight[1]*m20_loss + self.weight[2]*m30_loss
+        return loss
+
+################# Multi-Losses
 
 # Mutliscale Loss
 class TrunetLoss(nn.Module):
-    def __init__(self, frame_size_sdr=[4096, 2048, 1024, 512], frame_size_spec=[1024, 512, 256]):
+    def __init__(self, frame_size_sdr=[4096, 2048, 1024, 512], frame_size_spec=[1024, 512, 256], overlap=0.25):
         super(TrunetLoss, self).__init__()
-
         
         self.max_size = max(max(frame_size_sdr), max(frame_size_spec))
 
         self.sdr_loss = MultiscaleCosSDRLoss(frame_size_sdr)
-        self.spc_loss = MultiscaleSpectrogramLoss(frame_size_spec)
+        self.spc_loss = MultiscaleSpectrogramLoss(frame_size_spec,overlap=overlap)
 
     def forward(self, outputs, targets, out_dict=False):
         # shape: (batch_size, direct_or_reverberant, num_samples)
@@ -499,6 +619,114 @@ class TrunetLoss(nn.Module):
         return (
             losses if out_dict else torch.sum(torch.stack([v for v in losses.values()]))
         )
+
+## MutiLoss
+class MultiLoss1(nn.Module):
+    def __init__(self, 
+    frame_size_sdr=[4096, 2048, 1024, 512], 
+    frame_size_spec=[1024, 512, 256],
+    frame_size_aw=[1024, 512, 256],
+    weight_spec = 15,
+    weight_sdr = 1,
+    weight_aw = 1):
+        super(MultiLoss1, self).__init__()
+        
+        self.max_size = max(max(frame_size_sdr), max(frame_size_spec),max(frame_size_aw))
+
+        self.sdr_loss = MultiscaleCosSDRLoss(frame_size_sdr)
+        self.spc_loss = MultiscaleSpectrogramLoss(frame_size_spec)
+        self.aw_loss = MultiscaleAntiWrappingLoss(frame_size_aw)
+
+        self.weight_spec = weight_spec
+        self.weight_sdr = weight_sdr
+        self.weight_aw = weight_aw
+
+    def forward(self, outputs, targets, out_dict=False):
+        yd = outputs
+        td = targets
+
+        if yd.shape[1]% self.max_size != 0:
+            yd = yd[..., : -(yd.shape[-1] % self.max_size)]
+            td = td[..., : -(td.shape[-1] % self.max_size)]
+
+        self.losses = {
+            "MultiscaleSpectrogramLoss_Direct":      self.weight_spec*self.spc_loss(yd, td, out_dict=False),
+            "MultiscaleCosSDRWavLoss_Direct":        self.weight_sdr*self.sdr_loss(yd, td, out_dict=False),
+            "MultiscaleAntiWrappingLoss_Direct":     self.weight_aw*self.aw_loss(yd, td),
+        }
+
+        # fmt: on
+        return (
+            self.losses if out_dict else torch.sum(torch.stack([v for v in self.losses.values()]))
+        )
+
+# Multi-loss 2
+class MultiLoss2(nn.Module):
+    def __init__(self, frame_size_sdr=[4096, 2048, 1024, 512], frame_size_spec=[1024, 512, 256], overlap=0.25,weight_spec=15):
+        super(MultiLoss2, self).__init__()
+
+        self.weight_spec = weight_spec
+        
+        self.max_size = max(max(frame_size_sdr), max(frame_size_spec))
+
+        self.sdr_loss = MultiscaleCosSDRLoss(frame_size_sdr)
+        self.spc_loss = MultiscaleSpectrogramLoss(frame_size_spec,overlap=overlap)
+
+    def forward(self, outputs, targets, out_dict=False):
+        # shape: (batch_size, direct_or_reverberant, num_samples)
+        yd = outputs
+        td = targets
+
+        if yd.shape[1]% self.max_size != 0:
+            yd = yd[..., : -(yd.shape[-1] % self.max_size)]
+            td = td[..., : -(td.shape[-1] % self.max_size)]
+
+        # d=direct, r=reverberant; reverb = reverberant - direct
+        # fmt: off
+        losses = {
+            "MultiscaleSpectrogramLoss_Direct":      self.weight_spec * self.spc_loss(yd, td, out_dict=False),
+            "MultiscaleCosSDRWavLoss_Direct":        self.sdr_loss(yd, td, out_dict=False),
+        }
+        # fmt: on
+        return (
+            losses if out_dict else torch.sum(torch.stack([v for v in losses.values()]))
+        )
+
+# Multi-loss3
+class MultiDecibelLoss(nn.Module):
+    def __init__(self, 
+    frame_size_sdr=[4096, 2048, 1024, 512],
+    weight=[1,1,1]
+    ):
+        super(MultiDecibelLoss, self).__init__()
+        
+        self.max_size = max(frame_size_sdr)
+
+        self.sdr_loss = MultiscaleCosSDRLoss(frame_size_sdr)
+        self.mdb_loss = MultiMagnitudeLoss(weight=weight)
+
+    def forward(self, outputs, targets, out_dict=False):
+        # shape: (batch_size, direct_or_reverberant, num_samples)
+        yd = outputs
+        td = targets
+
+        if yd.shape[1]% self.max_size != 0:
+            yd = yd[..., : -(yd.shape[-1] % self.max_size)]
+            td = td[..., : -(td.shape[-1] % self.max_size)]
+
+        # d=direct, r=reverberant; reverb = reverberant - direct
+        # fmt: off
+        losses = {
+            "MultiDecibelLoss":      self.mdb_loss(yd, td),
+            "MultiscaleCosSDRWavLoss_Direct":        self.sdr_loss(yd, td, out_dict=False),
+        }
+        # fmt: on
+        return (
+            losses if out_dict else torch.sum(torch.stack([v for v in losses.values()]))
+        )
+
+
+
     
 class LevelInvariantNormalizedLoss(nn.Module) : 
     """
@@ -535,7 +763,5 @@ class LevelInvariantNormalizedLoss(nn.Module) :
         mL = self.MSE(mag_Y,mag_S)
         # Loss
         L = self.alpha*cL + (1-self.alpha)*mL
-
-
         
         return L
