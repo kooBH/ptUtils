@@ -29,7 +29,6 @@ def spec2plot(data,normalized=True):
     data = data.detach().cpu().numpy()
     n_shape = len(data.shape)
 
-
     # [ l ] -> wav
     if n_shape == 1 :
         data = rs.stft(data,n_fft = 512)
