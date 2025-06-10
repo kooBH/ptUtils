@@ -72,7 +72,12 @@ def STOI(estim,target,fs=16000,mode="both") :
 
     return stoi(target, estim, fs, extended=False)
 
-def SNR(estim,target, requires_grad=False,device="cuda:0") :
+def SNR(clean_signal, estim_signal,fs=16000,eps = 1e-13):
+    noise = estim_signal - clean_signal
+    snr = 10 * np.log10(np.mean(clean_signal ** 2) / (np.mean(noise ** 2) + eps))
+    return snr
+
+def SISDR(estim,target, fs=16000,requires_grad=False,device="cuda:0") :
     if estim.shape != target.shape : 
         raise Exception("ERROR::metric.py::SIR:: output shape != target shape | {} != {}".format(estim.shape,target.shape))
     estim = torch.Tensor(estim)
@@ -83,17 +88,14 @@ def SNR(estim,target, requires_grad=False,device="cuda:0") :
     tmp = estim - s_target 
     e_noise = (tmp)
 
-    SNR = (torch.inner(s_target,s_target))/torch.inner(e_noise,e_noise)
-    return 10*torch.log10(SNR)
+    SDR= (torch.inner(s_target,target))/torch.inner(e_noise,e_noise)
+    return 10*torch.log10(SDR)
 
 """
-Equivalent to SDR
+Equivalent to SISDR
 """
-def SDR(estim,target,requires_grad=False,device="cuda:0"):
-    return SNR(estim,target,requires_grad,device)
-
-def SISDR(estim,target,requires_grad=False,device="cuda:0"):
-    return SNR(estim,target,requires_grad,device)
+def SDR(estim,target,fs=16000,requires_grad=False,device="cuda:0"):
+    return SISDR(estim,target,requires_grad,device)
 
 
 class DNSMOS_singleton(object):

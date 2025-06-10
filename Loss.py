@@ -1,8 +1,25 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import librosa
 
 EPS=1e-7
+
+from torch.autograd import Function
+class angle(Function):
+    """Similar to torch.angle but robustify the gradient for zero magnitude."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor):
+        ctx.save_for_backward(x)
+        return torch.atan2(x.imag, x.real)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        (x,) = ctx.saved_tensors
+        grad_inv = grad / (x.real.square() + x.imag.square()).clamp_min_(1e-10)
+        return torch.view_as_complex(torch.stack((-x.imag * grad_inv, x.real * grad_inv), dim=-1))
+
 """
 SI-SDR(Scale Invariant Source-to-Distortion Ratio)
 == SI-SNR
@@ -98,7 +115,7 @@ def mwMSELoss(output,target,alpha=0.99,eps=1e-7,sr=16000,n_fft=512,device="cuda:
         mel_basis = mel_basis.to(device)
 
     if hann is None :
-        hann = torch.hann_window(n_fft,device=device,requires_grad=False)
+        hann = torch.hann_window(n_fft,device=device)
 
     output = torch.stft(output, n_fft, window=hann,return_complex=True)
     target = torch.stft(target, n_fft, window=hann,return_complex=True)
@@ -146,12 +163,12 @@ class CosSDRLossSegment(nn.Module):
         super(CosSDRLossSegment, self).__init__()
         self.reduction = reduction
 
-    def forward(self, output, target, out_dict=True):
+    def forward(self, output, target):
         num = torch.sum(target * output, dim=-1)
         den = torch.norm(target, dim=-1) * torch.norm(output, dim=-1)
         loss_per_element = -num / (den + EPS)
         loss = self.reduction(loss_per_element)
-        return {"CosSDRLossSegment": loss} if out_dict else loss
+        return loss
 
 class CosSDRLoss(nn.Module):
     def __init__(self, reduction=torch.mean):
@@ -159,14 +176,21 @@ class CosSDRLoss(nn.Module):
         self.segment_loss = CosSDRLossSegment(nn.Identity())
         self.reduction = reduction
 
-    def forward(self, output, target, chunk_size=1024, out_dict=True):
+    def forward(self, output, target, chunk_size=1024):
+
+        if output.shape[1]% chunk_size != 0:
+            print(f"CosSDRLoss:: {output.shape} {target.shape} {chunk_size}",end=" ")
+            output = output[..., : -(output.shape[-1] % chunk_size)]
+            target = target[..., : -(target.shape[-1] % chunk_size)]
+            print(f"-> {output.shape} {target.shape}")
+
         out_chunks = torch.reshape(output, [output.shape[0], -1, chunk_size])
         trg_chunks = torch.reshape(target, [target.shape[0], -1, chunk_size])
         loss_per_element = torch.mean(
-            self.segment_loss(out_chunks, trg_chunks, False), dim=-1
+            self.segment_loss(out_chunks, trg_chunks), dim=-1
         )
         loss = self.reduction(loss_per_element)
-        return {"CosSDRLoss": loss} if out_dict else loss
+        return loss
 
 class MultiscaleCosSDRLoss(nn.Module):
     def __init__(self, chunk_sizes, reduction=torch.mean):
@@ -175,19 +199,24 @@ class MultiscaleCosSDRLoss(nn.Module):
         self.loss = CosSDRLoss(nn.Identity())
         self.reduction = reduction
 
-    def forward(self, output, target, out_dict=True):
+    def forward(self, output, target):
         loss_per_scale = [
-            self.loss(output, target, cs, False) for cs in self.chunk_sizes
+            self.loss(output, target, cs) for cs in self.chunk_sizes
         ]
         loss_per_element = torch.mean(torch.stack(loss_per_scale), dim=0)
         loss = self.reduction(loss_per_element)
-        return {"MultiscaleCosSDRLoss": loss} if out_dict else loss
+        return loss
 
 class SpectrogramLoss(nn.Module):
-    def __init__(self, reduction=torch.mean,overlap=0.25):
+    def __init__(self, reduction=torch.mean,overlap=0.25,type_weight = 0, norm_window=False, weight_mag = 1.0, weight_cplx = 1.0):
         super(SpectrogramLoss, self).__init__()
         self.gamma = 0.3
         self.reduction = reduction
+        self.type_weight = type_weight
+        self.norm_window = norm_window
+
+        self.weight_mag = weight_mag
+        self.weight_cplx = weight_cplx
 
         if overlap == 0.5 : 
             self.denom = 2
@@ -196,39 +225,62 @@ class SpectrogramLoss(nn.Module):
 
         self.windows = {}
 
-    def forward(self, output, target, chunk_size=1024, out_dict=True):
+    def apply_weight(self, value, nfft):
+        # value : [B,F,T]
+        if self.type_weight == 0 :
+            return value
+
+        nhfft = nfft//2 + 1
+        # double weight on high freq
+        if self.type_weight == 1 : 
+            mid = int(nhfft/2)
+            value[:,mid:,:] *= 2
+            return value
         
+    def forward(self, output, target, chunk_size=1024, out_dict=True):
         if "{}".format(chunk_size) in self.windows.keys() : 
             window = self.windows["{}".format(chunk_size)]
+        # Create Window
         else :
-            window = torch.zeros(chunk_size)
-            if self.denom == 4 : 
-                for i in range(chunk_size):
-                    window[i] = torch.sin(torch.tensor(3.14159265358979323846 * (i + 0.5) / chunk_size))
-                tmp = 0
-                for i in range(chunk_size) :
-                    tmp += window[i] * window[i];
-                tmp /= chunk_size/4;
-                tmp = torch.sqrt(tmp);
-                for i in range(chunk_size) :
-                    window[i] /= tmp;
-            elif self.denom == 2 :
-                # sine window for 50%overlap
-                for i in range(chunk_size) :
-                    window[i] = torch.sin(torch.pi * torch.tensor((i+0.5) / chunk_size));
+            if self.norm_window : 
+                window = torch.zeros(chunk_size)
+                if self.denom == 4 : 
+                    for i in range(chunk_size):
+                        window[i] = torch.sin(torch.tensor(3.14159265358979323846 * (i + 0.5) / chunk_size))
+                    tmp = 0
+                    for i in range(chunk_size) :
+                        tmp += window[i] * window[i];
+                    tmp /= chunk_size/4;
+                    tmp = torch.sqrt(tmp);
+                    for i in range(chunk_size) :
+                        window[i] /= tmp;
+                elif self.denom == 2 :
+                    # sine window for 50%overlap
+                    for i in range(chunk_size) :
+                        window[i] = torch.sin(torch.pi * torch.tensor((i+0.5) / chunk_size));
+            else :
+                window = torch.hann_window(chunk_size)
                     
             window = window.to(output.device)
             self.windows["{}".format(chunk_size)] = window
-
 
         # stft.shape == (batch_size, fft_size, num_chunks)
         stft_output = torch.stft(output, chunk_size, hop_length=chunk_size//self.denom, return_complex=True, center=False,window = window)
         stft_target = torch.stft(target, chunk_size, hop_length=chunk_size//self.denom, return_complex=True, center=False, window = window)
 
         # clip is needed to avoid nan gradients in the backprop
-        mag_output = torch.clip(torch.abs(stft_output), min=EPS)
-        mag_target = torch.clip(torch.abs(stft_target), min=EPS)
-        distance = mag_target**self.gamma - mag_output**self.gamma
+        mag_output = torch.clip(torch.abs(stft_output), min=EPS)**self.gamma
+        mag_target = torch.clip(torch.abs(stft_target), min=EPS)**self.gamma
+        dist_mag = (mag_target - mag_output).pow(2)
+
+        cplx_output = torch.view_as_real(mag_output*torch.exp(1j*angle.apply(stft_output)))
+        cplx_target = torch.view_as_real(mag_target*torch.exp(1j*angle.apply(stft_target)))
+
+        dist_cplx = F.mse_loss(cplx_output, cplx_target)
+
+        distance = self.weight_mag * dist_mag + self.weight_cplx * dist_cplx
+
+        self.apply_weight(distance,chunk_size)
 
         # average out
         loss_per_chunk = torch.mean(distance**2, dim=1)
@@ -237,19 +289,18 @@ class SpectrogramLoss(nn.Module):
         return {"SpectrogramLoss": loss} if out_dict else loss
 
 class MultiscaleSpectrogramLoss(nn.Module):
-    def __init__(self, chunk_sizes, reduction=torch.mean,overlap=0.25):
+    def __init__(self, chunk_sizes, reduction=torch.mean,overlap=0.25,type_weight=None,norm_window=False,weight_mag = 1.0, weight_cplx = 1.0):
         super(MultiscaleSpectrogramLoss, self).__init__()
         self.chunk_sizes = chunk_sizes
-        self.loss = SpectrogramLoss(nn.Identity(),overlap=overlap)
+        self.loss = SpectrogramLoss(nn.Identity(),overlap=overlap,type_weight=type_weight,norm_window=norm_window,weight_mag=weight_mag, weight_cplx=weight_cplx)
         self.reduction = reduction
-
-    def forward(self, output, target, out_dict=True):
+    def forward(self, output, target):
         loss_per_scale = [
             self.loss(output, target, cs, False) for cs in self.chunk_sizes
         ]
         loss_per_element = torch.mean(torch.stack(loss_per_scale), dim=0)
         loss = self.reduction(loss_per_element)
-        return {"MultiscaleSpectrogramLoss": loss} if out_dict else loss
+        return  loss
 
 """
 Y. Ai and Z. -H. Ling, "Neural Speech Phase Prediction Based on Parallel Estimation Architecture and Anti-Wrapping Losses," ICASSP 2023 - 2023 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) , Rhodes Island, Greece, 2023, pp. 1-5, doi: 10.1109/ICASSP49357.2023.10096553.
@@ -293,8 +344,6 @@ class MultiscaleAntiWrappingLoss(nn.Module):
         ]
         loss = torch.mean(torch.stack(loss_per_scale), dim=0)
         return loss
-
-
 
 class MultiMagnitudeLoss(nn.Module):
     def __init__(self,
@@ -426,7 +475,6 @@ class MultiscaleSASNRLoss(nn.Module):
         loss = self.reduction(loss_per_element)
         return {"MultiscaleSASNRLoss": loss} if out_dict else loss
 
-
 ################# Multi-Losses
 
 # Mutliscale Loss
@@ -451,8 +499,8 @@ class TrunetLoss(nn.Module):
         # d=direct, r=reverberant; reverb = reverberant - direct
         # fmt: off
         losses = {
-            "MultiscaleSpectrogramLoss_Direct":      self.spc_loss(yd, td, out_dict=False),
-            "MultiscaleCosSDRWavLoss_Direct":        self.sdr_loss(yd, td, out_dict=False),
+            "MultiscaleSpectrogramLoss_Direct":      self.spc_loss(yd, td),
+            "MultiscaleCosSDRWavLoss_Direct":        self.sdr_loss(yd, td),
         }
         # fmt: on
         return (
@@ -489,7 +537,7 @@ class MultiLoss1(nn.Module):
             td = td[..., : -(td.shape[-1] % self.max_size)]
 
         self.losses = {
-            "MultiscaleSpectrogramLoss_Direct":      self.weight_spec*self.spc_loss(yd, td, out_dict=False),
+            "MultiscaleSpectrogramLoss_Direct":      self.weight_spec*self.spc_loss(yd, td),
             "MultiscaleCosSDRWavLoss_Direct":        self.weight_sdr*self.sdr_loss(yd, td, out_dict=False),
             "MultiscaleAntiWrappingLoss_Direct":     self.weight_aw*self.aw_loss(yd, td),
         }
@@ -524,7 +572,7 @@ class MultiLoss2(nn.Module):
         # d=direct, r=reverberant; reverb = reverberant - direct
         # fmt: off
         losses = {
-            "MultiscaleSpectrogramLoss_Direct":      self.weight_spec * self.spc_loss(yd, td, out_dict=False),
+            "MultiscaleSpectrogramLoss_Direct":      self.weight_spec * self.spc_loss(yd, td),
             "MultiscaleCosSDRWavLoss_Direct":        self.weight_sdr * self.sdr_loss(yd, td, out_dict=False),
         }
         # fmt: on
@@ -591,7 +639,7 @@ class MultiLoss4(nn.Module):
         # d=direct, r=reverberant; reverb = reverberant - direct
         # fmt: off
         losses = {
-            "MultiscaleSpectrogramLoss_Direct":      self.weight_spec * self.spc_loss(yd, td, out_dict=False),
+            "MultiscaleSpectrogramLoss_Direct":      self.weight_spec * self.spc_loss(yd, td),
             "MultiscaleSASNRLoss_Direct":        self.weight_sdr * self.sdr_loss(yd, td, out_dict=False),
         }
         # fmt: on
@@ -637,3 +685,45 @@ class LevelInvariantNormalizedLoss(nn.Module) :
         L = self.alpha*cL + (1-self.alpha)*mL
         
         return L
+
+### Integrated Loss Module
+class ListLoss(nn.Module):
+    def __init__(self,hp, loss_list : list, weight_list = None):
+        super(ListLoss, self).__init__()
+        self.loss_list = loss_list
+        self.hp = hp
+
+        losses = []
+        
+        for loss in loss_list:
+            cls = globals()[loss]
+            m = cls(**hp[loss])
+            self.add_module(loss,m)
+            losses.append(m)
+
+        self.weight = torch.ones(len(losses))
+
+        if weight_list is not None:
+            if len(weight_list) != len(losses):
+                raise ValueError("weight_list must be the same length as loss_list")
+
+            for i, weight in enumerate(weight_list):
+                if weight is not None:
+                    self.weight[i] = weight 
+
+        self.n_modules = len(losses)
+        self.losses = nn.ModuleList(losses)
+        
+    def forward(self, output, target):
+        self.weight = self.weight.to(output.device)
+        loss = 0
+        for i in range(self.n_modules):
+            l = self.losses[i](output, target) * self.weight[i]
+            loss += l
+
+        return loss
+    
+### None Speech Loss
+
+class LSNRLoss(nn.Module):
+    def __init__
