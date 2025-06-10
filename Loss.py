@@ -726,4 +726,13 @@ class ListLoss(nn.Module):
 ### None Speech Loss
 
 class LSNRLoss(nn.Module):
-    def __init__
+    def __init__(self) : 
+        super(LSNRLoss, self).__init__()
+
+    def forward(self, estim, clean, noisy):
+        # estim : [B,T,1]
+        # cleam : [B,L]
+        # noisy : [B,L
+        
+        # Convert to STFT
+        pass
