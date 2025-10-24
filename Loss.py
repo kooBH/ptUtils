@@ -78,21 +78,25 @@ def iSDRLoss(output,target, eps=2e-7):
 def logSDRLoss(output,target, eps=2e-7):
     return SDR(output,target,eps)
 
-def wMSELoss(output,target,alpha=0.9,eps=1e-13):
-    s_mag = torch.abs(target)
-    s_hat_mag = torch.abs(output)
+class wMSELoss(nn.Module) : 
+    def __init__(self, alpha=0.99):
+        super(wMSELoss, self).__init__()
+        self.alpha = alpha
 
-    # scale
-    s_mag= torch.log10(1+s_mag)
-    s_hat_mag= torch.log10(1+s_hat_mag)
- 
-    s_mag = s_mag/torch.max(s_mag)
-    s_hat_mag = s_hat_mag/torch.max(s_hat_mag)
+    def forward(self, output, target):
+        s_mag = torch.abs(target)
+        s_hat_mag = torch.abs(output)
 
-    d = s_mag - s_hat_mag
+        # scale
+        s_mag= torch.log10(1+s_mag)
+        s_hat_mag= torch.log10(1+s_hat_mag)
+    
+        s_mag = s_mag/torch.max(s_mag)
+        s_hat_mag = s_hat_mag/torch.max(s_hat_mag)
 
-    return torch.mean(alpha*(d + d.abs())/2 + (1-alpha) * (d-d.abs()).abs()/2)
+        d = s_mag - s_hat_mag
 
+        return torch.mean(self.alpha*(d + d.abs())/2 + (1-self.alpha) * (d-d.abs()).abs()/2)
 
 """
     Mel-domain Weighted Error
@@ -143,6 +147,11 @@ def mwMSELoss(output,target,alpha=0.99,eps=1e-7,sr=16000,n_fft=512,device="cuda:
     s_hat_mag = s_hat_mag/torch.max(s_hat_mag)
 
     d = s - s_hat
+
+    # s >= s_Hat
+    # -> mwMSE = torch.mean(alpha*d)
+    # else 
+    # -> mwMSE = torch.mean((1-alpha)*d)
 
     mwMSE = torch.mean(alpha *(d + d.abs())/2 + (1-alpha) * (d-d.abs()).abs()/2)
 
@@ -208,7 +217,7 @@ class MultiscaleCosSDRLoss(nn.Module):
         return loss
 
 class SpectrogramLoss(nn.Module):
-    def __init__(self, reduction=torch.mean,overlap=0.25,type_weight = 0, norm_window=False, weight_mag = 1.0, weight_cplx = 1.0):
+    def __init__(self, reduction=torch.mean,overlap=0.25,type_weight = 0, norm_window=False, weight_mag = 1.0, weight_cplx = 1.0, alpha_mag = None):
         super(SpectrogramLoss, self).__init__()
         self.gamma = 0.3
         self.reduction = reduction
@@ -223,6 +232,7 @@ class SpectrogramLoss(nn.Module):
         else :
             self.denom = 4
 
+        self.alpha_mag = alpha_mag
         self.windows = {}
 
     def apply_weight(self, value, nfft):
@@ -271,7 +281,15 @@ class SpectrogramLoss(nn.Module):
         # clip is needed to avoid nan gradients in the backprop
         mag_output = torch.clip(torch.abs(stft_output), min=EPS)**self.gamma
         mag_target = torch.clip(torch.abs(stft_target), min=EPS)**self.gamma
-        dist_mag = (mag_target - mag_output).pow(2)
+        if self.alpha_mag is not None :
+            d = mag_target - mag_output
+            # if mag_target >= mag_output
+            #   dist_mag = alpha_mag * d
+            # else 
+            #   dist_mag = (1-alpha_mag) * d
+            dist_mag = self.alpha_mag * (d + d.abs())/2 + (1-self.alpha_mag) * (d-d.abs()).abs()/2
+        else : 
+            dist_mag = (mag_target - mag_output).abs()
 
         cplx_output = torch.view_as_real(mag_output*torch.exp(1j*angle.apply(stft_output)))
         cplx_target = torch.view_as_real(mag_target*torch.exp(1j*angle.apply(stft_target)))
@@ -289,10 +307,10 @@ class SpectrogramLoss(nn.Module):
         return {"SpectrogramLoss": loss} if out_dict else loss
 
 class MultiscaleSpectrogramLoss(nn.Module):
-    def __init__(self, chunk_sizes, reduction=torch.mean,overlap=0.25,type_weight=None,norm_window=False,weight_mag = 1.0, weight_cplx = 1.0):
+    def __init__(self, chunk_sizes, reduction=torch.mean,overlap=0.25,type_weight=None,norm_window=False,weight_mag = 1.0, weight_cplx = 1.0, alpha_mag = None):
         super(MultiscaleSpectrogramLoss, self).__init__()
         self.chunk_sizes = chunk_sizes
-        self.loss = SpectrogramLoss(nn.Identity(),overlap=overlap,type_weight=type_weight,norm_window=norm_window,weight_mag=weight_mag, weight_cplx=weight_cplx)
+        self.loss = SpectrogramLoss(nn.Identity(),overlap=overlap,type_weight=type_weight,norm_window=norm_window,weight_mag=weight_mag, weight_cplx=weight_cplx, alpha_mag=alpha_mag)
         self.reduction = reduction
     def forward(self, output, target):
         loss_per_scale = [
@@ -724,15 +742,65 @@ class ListLoss(nn.Module):
         return loss
     
 ### None Speech Loss
-
 class LSNRLoss(nn.Module):
-    def __init__(self) : 
+    def __init__(self,n_fft=512,hop_length=256):
         super(LSNRLoss, self).__init__()
+        self. n_fft = n_fft
+        self.hop_length = hop_length
+        self.criterion = nn.MSELoss()
 
     def forward(self, estim, clean, noisy):
         # estim : [B,T,1]
-        # cleam : [B,L]
-        # noisy : [B,L
+        # clean : [B,L]
+        # noisy : [B,L]
         
-        # Convert to STFT
-        pass
+        # Cunfold
+        clean_seg = clean.unfold(1, self.n_fft, self.hop_length)
+        noise = noisy - clean
+        noise_seg = noise.unfold(1, self.n_fft, self.hop_length)
+
+        clean_mag = torch.sum(clean_seg**2, dim=2, keepdim=True)
+        noise_mag = torch.sum(noise_seg**2,dim=2,keepdim=True)
+
+        clean_dB = 10 * torch.log10(clean_mag + 1e-10)
+        noise_dB = 10 * torch.log10(noise_mag + 1e-10)
+
+        lsnr = clean_dB - noise_dB
+        lsnr = nn.functional.pad(lsnr, (0,0,1,1), mode='constant', value=0.0)
+        lsnr = torch.clamp(lsnr, min=-20.0, max=20.0)
+        lsnr = lsnr/20.0
+
+        loss = self.criterion(estim, lsnr)
+        return loss
+
+
+
+# From https://github.com/dmlguq456/TF_Restormer
+class UTMOSLoss(torch.nn.Module):
+	def __init__(self, fs, device='cuda'):
+		super().__init__()
+		# Load UTMOS22 strong model via torch.hub
+		self.model = torch.hub.load("tarepan/SpeechMOS:v1.2.0", "utmos22_strong", trust_repo=True)
+		self.model.to(device)
+		self.model.train()
+		self.fs = fs
+	
+    # target is not used in this loss
+	def forward(self, estim, target):
+		# Ensure inputs are in the correct shape (batch_size, samples)
+		if estim.dim() == 1:
+			estim = estim.unsqueeze(0)
+
+		scores = self.model(estim, sr=self.fs)
+		
+		return -torch.mean(scores)
+	
+	def mos(self, x):
+		# Ensure inputs are in the correct shape (batch_size, samples)
+		if x.dim() == 1:
+			x = x.unsqueeze(0)
+		
+		with torch.no_grad():
+			scores = self.model(x, sr=self.fs)
+		
+		return scores

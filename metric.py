@@ -82,14 +82,31 @@ def SISDR(estim,target, fs=16000,requires_grad=False,device="cuda:0") :
         raise Exception("ERROR::metric.py::SIR:: output shape != target shape | {} != {}".format(estim.shape,target.shape))
     estim = torch.Tensor(estim)
     target = torch.Tensor(target)
+    #prev
 
     s_target = (torch.inner(estim,target)*target/torch.inner(target,target))
 
     tmp = estim - s_target 
     e_noise = (tmp)
 
-    SDR= (torch.inner(s_target,target))/torch.inner(e_noise,e_noise)
-    return 10*torch.log10(SDR)
+    SDR= (torch.inner(s_target,target))/(torch.inner(e_noise,e_noise)+1e-13)
+    #SDR= (torch.abs(torch.inner(s_target,target)))/torch.inner(e_noise,e_noise)
+    return 10*torch.log10(SDR + 1e-13)
+    
+    """
+    # zero-mean
+    estim = estim - estim.mean()
+    target = target - target.mean()
+    alpha = torch.inner(estim, target) / torch.inner(target, target)
+    s_target = alpha * target
+
+    e_noise = estim - s_target
+
+    numer = torch.inner(s_target, s_target)
+    denom = torch.inner(e_noise, e_noise)
+
+    return 10 * torch.log10(numer / denom)
+    """
 
 """
 Equivalent to SISDR
@@ -274,6 +291,35 @@ def SigMOS(estim,target,fs=16000, ret_all = False):
         return [clip_dict['MOS_OVRL'],clip_dict['MOS_SIG'],clip_dict['MOS_NOISE'],clip_dict['MOS_REVERB'],clip_dict['MOS_DISC'],clip_dict['MOS_LOUD'],clip_dict['MOS_COL']]
     else :
         return clip_dict["MOS_OVRL"]
+
+# UTMOS: UTokyo-SaruLab System for VoiceMOS Challenge 2022
+# https://arxiv.org/pdf/2204.02152
+class UTMOS_signleton():
+    def __new__(self):
+        if not hasattr(self,'instance'):
+            self.model = torch.hub.load("tarepan/SpeechMOS:v1.2.0", "utmos22_strong", trust_repo=True)
+            self.model.eval()
+            self.instance = super(UTMOS_signleton, self).__new__(self)
+        else :
+            pass
+        return self.instance
+
+    def __call__(self,x , fs=16000):
+        if not torch.is_tensor(x) :
+            x = torch.from_numpy(x)
+
+        if x.dim() == 1:
+            x= x.unsqueeze(0)
+
+        score = self.model(x, sr=fs)
+        return score.item()
+      
+
+
+def UTMOS(estim,target,fs=16000):
+    metric = UTMOS_signleton()
+    score = metric(estim,fs=fs)
+    return score
 
 
 def run_metric(estim,target,method,fs=16000):
