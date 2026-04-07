@@ -82,31 +82,31 @@ def SISDR(estim,target, fs=16000,requires_grad=False,device="cuda:0") :
         raise Exception("ERROR::metric.py::SIR:: output shape != target shape | {} != {}".format(estim.shape,target.shape))
     estim = torch.Tensor(estim)
     target = torch.Tensor(target)
-    #prev
 
-    s_target = (torch.inner(estim,target)*target/torch.inner(target,target))
+    # cetnering
+    estim = estim - torch.mean(estim)
+    target = target - torch.mean(target)
 
-    tmp = estim - s_target 
-    e_noise = (tmp)
+    # 2. Dot products
+    # Use eps to prevent division by zero if target is silent
+    eps = 1e-7
+    dot_target_target = torch.sum(target * target) + eps
+    dot_estim_target = torch.sum(estim * target)
 
-    SDR= (torch.inner(s_target,target))/(torch.inner(e_noise,e_noise)+1e-13)
-    #SDR= (torch.abs(torch.inner(s_target,target)))/torch.inner(e_noise,e_noise)
-    return 10*torch.log10(SDR + 1e-13)
-    
-    """
-    # zero-mean
-    estim = estim - estim.mean()
-    target = target - target.mean()
-    alpha = torch.inner(estim, target) / torch.inner(target, target)
+    # 3. Projection of estim onto target: s_target = (<e, t> * t) / ||t||^2
+    alpha = dot_estim_target / dot_target_target
     s_target = alpha * target
 
+    # 4. Noise component: e_noise = estim - s_target
     e_noise = estim - s_target
 
-    numer = torch.inner(s_target, s_target)
-    denom = torch.inner(e_noise, e_noise)
+    # 5. Calculate Ratio
+    target_energy = torch.sum(s_target * s_target) + eps
+    noise_energy = torch.sum(e_noise * e_noise) + eps
 
-    return 10 * torch.log10(numer / denom)
-    """
+    # 6. Final SI-SDR calculation with clipping to avoid log(0) or extreme values
+    si_sdr = 10 * torch.log10(target_energy / noise_energy)
+    return si_sdr
 
 """
 Equivalent to SISDR

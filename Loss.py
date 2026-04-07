@@ -2,10 +2,53 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import librosa
+import numpy as np
+from torch import Tensor
+ 
 
 EPS=1e-7
 
 from torch.autograd import Function
+
+
+def calulate_window(window_size, hop_length, norm=True):
+    window = torch.zeros(window_size)
+    denom = window_size // hop_length
+    if norm: 
+        if denom == 4 : 
+            for i in range(window_size):
+                window[i] = torch.sin(torch.tensor(3.14159265358979323846 * (i + 0.5) / window_size))
+            tmp = 0
+            for i in range(window_size) :
+                tmp += window[i] * window[i]
+            tmp /= window_size/4
+            tmp = torch.sqrt(tmp)
+            for i in range(window_size) :
+                window[i] /= tmp
+        elif denom == 2 :
+            # sine window for 50%overlap
+            for i in range(window_size) :
+                window[i] = torch.sin(torch.pi * torch.tensor((i+0.5) / window_size))
+    else :
+        window = torch.hann_window(window_size)
+    return window
+
+class SpecLoss(nn.Module):
+    def __init__(self, n_fft,n_hop):
+        super().__init__()
+        self.n_fft = n_fft
+        self.n_hop = n_hop
+        self.window = calulate_window(n_fft,n_hop,True)
+
+    def Analysis(self, x):
+        return torch.stft(x, self.n_fft, hop_length=self.n_hop, window=self.window.to(x.device), return_complex=True, center=False)
+
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError()
+
+
+
+
 class angle(Function):
     """Similar to torch.angle but robustify the gradient for zero magnitude."""
 
@@ -736,6 +779,8 @@ class ListLoss(nn.Module):
         for i in range(self.n_modules):
             l = self.losses[i](output, target) * self.weight[i]
             loss += l
+            if torch.isnan(l):
+                print(f"Loss {self.loss_list[i]} is NaN")
 
         return loss
     
@@ -802,3 +847,93 @@ class UTMOSLoss(torch.nn.Module):
 			scores = self.model(x, sr=self.fs)
 		
 		return scores
+    
+
+"""
+Based on https://github.com/aask1357/fastenhancer/
+
+MIT License
+
+Copyright (c) 2025 AHN Sung Hwan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+class MagMSELoss(SpecLoss):
+    def __init__(self, n_fft,n_hop,**kwargs): 
+        super().__init__(n_fft,n_hop)
+    def forward(self, s1: Tensor, s2: Tensor) -> Tensor:
+        s1 = self.Analysis(s1)
+        s2 = self.Analysis(s2)
+        s1 = torch.abs(s1)
+        s2 = torch.abs(s2)
+        return F.mse_loss(s1, s2)
+
+class ComplexMSELoss(SpecLoss):
+    def __init__(self, n_fft, n_hop, **kwargs):
+        super().__init__(n_fft,n_hop)
+    
+    def forward(self, s1: Tensor, s2: Tensor) -> Tensor:
+        s1 = self.Analysis(s1)
+        s2 = self.Analysis(s2)
+        return F.mse_loss(torch.view_as_real(s1), torch.view_as_real(s2))
+
+class PESQLoss(nn.Module):
+    def __init__(self,**kwargs):
+        from torch_pesq import PesqLoss
+        super().__init__()
+        self.initialized = False
+        self.pesq_loss = PesqLoss(1.0, sample_rate=16_000)
+    
+    def forward(self, estim, target) -> Tensor:
+        if not self.initialized:
+            self.pesq_loss.to(estim.device)
+            self.initialized = True
+        with torch.amp.autocast("cuda", enabled=False):
+            loss = self.pesq_loss(target.float(), estim.float())
+        return loss.mean()
+    
+class WavL1Loss(nn.Module):
+    def __init__(self,**kwargs):
+        super().__init__()
+    
+    def forward(self, wav_hat: Tensor, wav: Tensor) -> Tensor:
+        return F.l1_loss(wav_hat, wav)
+
+class ConsistencyLoss(SpecLoss):
+    def __init__(
+        self, n_fft,n_hop, compression: float = 1.0, eps=1e-7,**kwargs
+    ):
+        super().__init__(n_fft,n_hop)
+        self.compression = compression
+        self.eps = eps
+    
+    def forward(self, estim: Tensor, target: Tensor) -> Tensor:
+        estim = self.Analysis(estim)
+        target = self.Analysis(target)
+
+        mag_hat = torch.abs(estim).clamp(min=self.eps)
+        mag = torch.abs(target).clamp(min=self.eps)
+
+        estim = estim * mag_hat.pow(self.compression - 1.0)
+        target = target * mag.pow(self.compression - 1.0)
+
+        loss = F.mse_loss(torch.view_as_real(estim), torch.view_as_real(target))
+
+        return loss
