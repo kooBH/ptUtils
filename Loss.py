@@ -188,10 +188,8 @@ class CosSDRLoss(nn.Module):
     def forward(self, output, target, chunk_size=1024):
 
         if output.shape[1]% chunk_size != 0:
-            print(f"CosSDRLoss:: {output.shape} {target.shape} {chunk_size}",end=" ")
             output = output[..., : -(output.shape[-1] % chunk_size)]
             target = target[..., : -(target.shape[-1] % chunk_size)]
-            print(f"-> {output.shape} {target.shape}")
 
         out_chunks = torch.reshape(output, [output.shape[0], -1, chunk_size])
         trg_chunks = torch.reshape(target, [target.shape[0], -1, chunk_size])
