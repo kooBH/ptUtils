@@ -30,7 +30,8 @@ class MyWriter(SummaryWriter):
         self.add_scalar('test_loss', test_loss, step)
 
     def log_audio(self,wav,label='label',step=0) : 
-        wav = wav.detach().cpu().numpy()
+        if type(wav) == torch.Tensor :
+            wav = wav.detach().cpu().numpy()
         wav = wav/np.max(np.abs(wav))
         self.add_audio(label, wav, step, self.sr)
 

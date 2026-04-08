@@ -5,6 +5,7 @@ import numpy as np
 from matplotlib import cm
 import io
 import PIL.Image
+import torch
 from torchvision.transforms import ToTensor
 import librosa as rs
 
@@ -25,8 +26,9 @@ def MFCC2plot(MFCC):
     plt.close()
     return data
 
-def spec2plot(data,normalized=True):
-    data = data.detach().cpu().numpy()
+def spec2plot(data : np.ndarray,normalized=True):
+    if type(data) == torch.Tensor :
+        data = data.detach().cpu().numpy()
     n_shape = len(data.shape)
 
     # [ l ] -> wav
