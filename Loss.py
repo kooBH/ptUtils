@@ -10,6 +10,19 @@ EPS=1e-7
 
 from torch.autograd import Function
 
+def as_module(func):
+    """
+    Decorator to convert a function into an nn.Module factory.
+    """
+    class Wrapped(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.kwargs = kwargs
+        def forward(self, *args, **kwargs):
+            # Combine init-time kwargs and forward-time kwargs
+            merged = {**self.kwargs, **kwargs}
+            return func(*args, **merged)
+    return Wrapped
 
 def calulate_window(window_size, hop_length, norm=True):
     window = torch.zeros(window_size)
@@ -26,7 +39,7 @@ def calulate_window(window_size, hop_length, norm=True):
             for i in range(window_size) :
                 window[i] /= tmp
         elif denom == 2 :
-            # sine window for 50%overlap
+        # sine window for 50% overlap
             for i in range(window_size) :
                 window[i] = torch.sin(torch.pi * torch.tensor((i+0.5) / window_size))
     else :
@@ -45,8 +58,6 @@ class SpecLoss(nn.Module):
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError()
-
-
 
 
 class angle(Function):
@@ -97,6 +108,7 @@ def mSDRLoss(output,target, eps=1e-7):
 
     return torch.mean(-(correlation / (energies + eps)))
 
+@as_module
 def wSDRLoss(output,noisy,target,alpha=0.01,inSTFT=True,eps=2e-7):
         noise = noisy - target
         noise_est = noisy - output
@@ -141,64 +153,65 @@ class wMSELoss(nn.Module) :
 
         return torch.mean(self.alpha*(d + d.abs())/2 + (1-self.alpha) * (d-d.abs()).abs()/2)
 
-"""
-    Mel-domain Weighted Error
-    output : STFT [B,F,T]
-    target : STFT [B,F,T]
-"""
 
-mel_basis = None
-hann = None
+class mwMSELoss(nn.Module):
+    def __init__(self, alpha=0.99, eps=1e-7, sr=16000, n_fft=512, n_mels=40, device="cuda:0"):
+        super(mwMSELoss, self).__init__()
+        self.alpha = alpha
+        self.eps = eps
+        self.sr = sr
+        self.n_fft = n_fft
+        self.device = device
 
-def mwMSELoss(output,target,alpha=0.99,eps=1e-7,sr=16000,n_fft=512,device="cuda:0"):
-    global mel_basis
-    global hann
-    # output : [B,L]
-    # target : [B,L]
-
-    if mel_basis is None :
-        mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft,n_mels=40)
+        mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft,n_mels=n_mels)
         mel_basis = torch.from_numpy(mel_basis)
         mel_basis = mel_basis.to(device)
+        self.register_buffer("mel_basis", mel_basis)
 
-    if hann is None :
         hann = torch.hann_window(n_fft,device=device)
+        self.register_buffer("hann", hann)
 
-    output = torch.stft(output, n_fft, window=hann,return_complex=True)
-    target = torch.stft(target, n_fft, window=hann,return_complex=True)
+    def forward(self, output, target):
+        """
+            Mel-domain Weighted Error
+            output : STFT [B,L]
+            target : STFT [B,L]
+        """
+        output = torch.stft(output, self.n_fft, window=self.hann,return_complex=True)
+        target = torch.stft(target, self.n_fft, window=self.hann,return_complex=True)
 
-    # ERROR : weight becomes NAN
-    # --> torch backpropagation weight clipping on 'sqrt'
-    #    --> omitted 'sqrt'
-    #s_mag = torch.sqrt(target[:,:,:,0]**2 + target[:,:,:,1]**2)
-    #s_hat_mag = torch.sqrt(output[:,:,:,0]**2 + output[:,:,:,1]**2)
+        # ERROR : weight becomes NAN
+        # --> torch backpropagation weight clipping on 'sqrt'
+        #    --> omitted 'sqrt'
+        #s_mag = torch.sqrt(target[:,:,:,0]**2 + target[:,:,:,1]**2)
+        #s_hat_mag = torch.sqrt(output[:,:,:,0]**2 + output[:,:,:,1]**2)
 
-    # add eps due to 'MmBackward nan' error in gradient
-    s_hat_mag = torch.abs(output) + eps
-    s_mag = torch.abs(target) + eps
+        # add eps due to 'MmBackward nan' error in gradient
+        s_hat_mag = torch.abs(output) + self.eps
+        s_mag = torch.abs(target) + self.eps
 
-    # scale
-    s_mag= torch.log10(1+s_mag)
-    s_hat_mag= torch.log10(1+s_hat_mag)
+        # scale
+        s_mag= torch.log10(1+s_mag)
+        s_hat_mag= torch.log10(1+s_hat_mag)
 
-    # mel
-    s = torch.matmul(mel_basis,s_mag)
-    s_hat = torch.matmul(mel_basis,s_hat_mag)
+        # mel
+        s = torch.matmul(self.mel_basis,s_mag)
+        s_hat = torch.matmul(self.mel_basis,s_hat_mag)
 
-    # Batch Norm
-    s_mag = s_mag/torch.max(s_mag)
-    s_hat_mag = s_hat_mag/torch.max(s_hat_mag)
+        # Batch Norm
+        s_mag = s_mag/torch.max(s_mag)
+        s_hat_mag = s_hat_mag/torch.max(s_hat_mag)
 
-    d = s - s_hat
+        d = s - s_hat
 
-    # s >= s_Hat
-    # -> mwMSE = torch.mean(alpha*d)
-    # else 
-    # -> mwMSE = torch.mean((1-alpha)*d)
+        # s >= s_Hat
+        # -> mwMSE = torch.mean(alpha*d)
+        # else 
+        # -> mwMSE = torch.mean((1-alpha)*d)
 
-    mwMSE = torch.mean(alpha *(d + d.abs())/2 + (1-alpha) * (d-d.abs()).abs()/2)
+        mwMSE = torch.mean(self.alpha *(d + d.abs())/2 + (1-self.alpha) * (d-d.abs()).abs()/2)
 
-    return  mwMSE
+        return  mwMSE
 
 """
 weighted-SDR loss
@@ -937,3 +950,142 @@ class ConsistencyLoss(SpecLoss):
         loss = F.mse_loss(torch.view_as_real(estim), torch.view_as_real(target))
 
         return loss
+    
+import itertools
+
+# Loss wrapper for Permutation Invariant Training (PIT)
+class PITLoss(nn.Module):
+    def __init__(self, base_loss: nn.Module, max_src: int):
+        super().__init__()
+        self.base_loss = base_loss
+        self.max_src = max_src
+
+        self.perms = list(itertools.permutations(range(self.max_src)))
+
+    def forward(self, estim: Tensor, target: Tensor) -> Tensor:
+        """
+        Args:
+            estim: (Batch, Num_Sources, Features)
+            target: (Batch, Num_Sources, Features)
+        Returns:
+            min_loss: Scalar tensor represented the average PIT loss over the batch.
+        """
+        batch_size = estim.size(0)
+        
+        # Holder for losses of all permutations per sample
+        # Expected final shape after loop: (Batch, Num_Permutations)
+        batch_perm_losses = []
+        
+        for perm in self.perms:
+            permuted_estim = estim[:, perm, :]
+            
+            source_losses = []
+            for i in range(self.max_src):
+                # Compute loss for the current source pair
+                loss_per_sample = self.base_loss(permuted_estim[:, i], target[:, i])
+                
+                # Dynamic shape handling for safety (especially when batch_size = 1 or reduction='mean')
+                # Force the loss to have at least 1 dimension representing the batch
+                if loss_per_sample.dim() == 0:
+                    # If base_loss returned a scalar (due to reduction='mean' and batch_size=1),
+                    # expand it back to shape (1,) to represent the batch dimension.
+                    loss_per_sample = loss_per_sample.unsqueeze(0)
+                elif loss_per_sample.dim() > 1:
+                    # If features remain, reduce them to sound-level loss per sample
+                    loss_per_sample = torch.mean(loss_per_sample, dim=list(range(1, loss_per_sample.dim())))
+                
+                source_losses.append(loss_per_sample)  # List of (Batch,)
+            
+            # Average over sources for the current permutation
+            # Shape: (Batch,)
+            perm_loss = torch.mean(torch.stack(source_losses, dim=0), dim=0)
+            batch_perm_losses.append(perm_loss)
+            
+        # Shape: (Batch, Num_Permutations)
+        batch_perm_losses = torch.stack(batch_perm_losses, dim=1)
+        
+        # Find the minimum loss for EACH sample independently
+        # min_losses_per_sample shape: (Batch,)
+        min_losses_per_sample, _ = torch.min(batch_perm_losses, dim=1)
+        
+        # Final objective: average over the batch (Works perfectly for batch_size=1 as well)
+        return torch.mean(min_losses_per_sample)
+
+
+####### ACCDOA #####
+def ACCDOA_label(vad,azimuth,elevation):
+    """Generates ACCDOA (Activity-coupled Cartesian Direction of Arrival) labels.
+    Args:
+        vad (torch.Tensor): Voice Activity Detection format with shape [B, N, T]
+        azimuth (torch.Tensor): Azimuth angle in radians with shape [B, N]
+        elevation (torch.Tensor): Elevation angle in radians with shape [B, N]
+    Returns:
+        torch.Tensor: ACCDOA labels with shape [B, N, T, 3]
+                      The last dimension contains [x, y, z] coordinates.
+    """
+    # 1. Unsqueeze to align with the time dimension (T) of VAD [B, N] -> [B, N, 1]
+    azimuth_expanded = azimuth.unsqueeze(-1)
+    elevation_expanded = elevation.unsqueeze(-1)
+
+    # 2. Convert Spherical Coordinates to Cartesian Coordinates (Unit Vector)
+    # Target shape for each component: [B, N, 1] (will broadcast to [B, N, T] during multiplication)
+    x = torch.cos(elevation_expanded) * torch.cos(azimuth_expanded)
+    y = torch.cos(elevation_expanded) * torch.sin(azimuth_expanded)
+    z = torch.sin(elevation_expanded)
+
+    # 3. Couple Cartesian coordinates with voice activity (VAD)
+    # Shape of each component after broadcasting: [B, N, T]
+    acc_x = vad * x
+    acc_y = vad * y
+    acc_z = vad * z
+
+    # 4. Stack along the last dimension to get [B, N, T, 3]
+    # This aligns the [x, y, z] vectors at the final axis for each time frame
+    acc_doa = torch.stack([acc_x, acc_y, acc_z], dim=-1)
+    acc_doa = acc_doa.float() 
+    acc_doa.to(vad.device)
+    return acc_doa
+
+class PIT_ACCDOALoss(nn.Module):
+    def __init__(self, max_src):
+        super(PIT_ACCDOALoss, self).__init__()
+        self.max_src = max_src
+        self.criterion = nn.MSELoss(reduction='none')  # Compute loss per element for PIT
+        self.perms = list(itertools.permutations(range(self.max_src)))
+
+    def forward(self, estim, target_vad, target_azimuth, target_elevation):
+        """
+        Args:
+            estim: (Batch, Num_Sources, Time, 3) - Predicted ACCDOA vectors
+            target_vad: (Batch, Num_Sources, Time`) - Ground truth VAD. Time dimension may differ from estim, but should be interpolated
+            target_azimuth: (Batch, Num_Sources) - Ground truth azimuth angles in radians
+            target_elevation: (Batch, Num_Sources) - Ground truth elevation angles in radians
+        Returns:
+            loss: Scalar tensor representing the PIT loss over ACCDOA predictions.
+        """
+        # Generate target ACCDOA labels from VAD and DOA angles
+        target_accdoa = ACCDOA_label(target_vad, target_azimuth, target_elevation) # [B,N,T,3]
+
+        # Interpolate estimated ACCDOA to match the time dimension of target_vad if necessary
+        if estim.shape[2] != target_accdoa.shape[2]:
+            target_time = target_accdoa.shape[2]
+            target_3 = target_accdoa.shape[3]
+            estim = F.interpolate(estim, size=(target_time, target_3), mode='bilinear', align_corners=False)
+
+        b_losses = []
+        for perm in self.perms:
+            permuted_estim = estim[:, perm, :, :]  # Permute the source dimension
+            
+            loss_per_source = self.criterion(permuted_estim, target_accdoa)  # Element-wise MSE
+            
+            loss_per_source = loss_per_source.mean(dim=[1, 2])  # Average over Time and Coordinate
+            
+            b_losses.append(loss_per_source)  # List of (Batch,) for each permutation
+        # Stack losses for all permutations: Shape (Batch, Num_Permutations)
+        b_losses = torch.stack(b_losses, dim=1)
+        # Find the minimum loss for each sample across permutations: Shape (Batch,)
+        min_loss_per_sample, _ = torch.min(b_losses, dim=1)
+        # Average over the batch to get the final scalar loss
+        return torch.mean(min_loss_per_sample)
+
+        
