@@ -1118,13 +1118,17 @@ class ListLoss(nn.Module):
         self.n_modules = len(losses)
         self.losses = nn.ModuleList(losses)
         
-    def forward(self, output, target):
+    def forward(self, output, target,return_dict=False):
         self.weight = self.weight.to(output.device)
         loss = 0
+        lost_dict = {}
         for i in range(self.n_modules):
             l = self.losses[i](output, target) * self.weight[i]
             loss += l
             if torch.isnan(l):
                 print(f"Loss {self.loss_list[i]} is NaN")
+            lost_dict[self.loss_list[i]] = l
 
+        if return_dict:
+            return loss, lost_dict
         return loss
