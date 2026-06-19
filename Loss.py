@@ -758,44 +758,7 @@ class LevelInvariantNormalizedLoss(nn.Module) :
         
         return L
 
-### Integrated Loss Module
-class ListLoss(nn.Module):
-    def __init__(self,hp, loss_list : list, weight_list = None):
-        super(ListLoss, self).__init__()
-        self.loss_list = loss_list
-        self.hp = hp
 
-        losses = []
-        
-        for loss in loss_list:
-            cls = globals()[loss]
-            m = cls(**hp[loss])
-            self.add_module(loss,m)
-            losses.append(m)
-
-        self.weight = torch.ones(len(losses))
-
-        if weight_list is not None:
-            if len(weight_list) != len(losses):
-                raise ValueError("weight_list must be the same length as loss_list")
-
-            for i, weight in enumerate(weight_list):
-                if weight is not None:
-                    self.weight[i] = weight 
-
-        self.n_modules = len(losses)
-        self.losses = nn.ModuleList(losses)
-        
-    def forward(self, output, target):
-        self.weight = self.weight.to(output.device)
-        loss = 0
-        for i in range(self.n_modules):
-            l = self.losses[i](output, target) * self.weight[i]
-            loss += l
-            if torch.isnan(l):
-                print(f"Loss {self.loss_list[i]} is NaN")
-
-        return loss
     
 ### None Speech Loss
 class LSNRLoss(nn.Module):
@@ -1088,4 +1051,80 @@ class PIT_ACCDOALoss(nn.Module):
         # Average over the batch to get the final scalar loss
         return torch.mean(min_loss_per_sample)
 
+from itertools import combinations
+class PairwisePearsonCorrelationLoss(nn.Module):
+    def __init__(self, N: int, eps: float = 1e-8):
+        """
+        Loss function to penalize pairwise Pearson correlation between N sources.
+        """
+        super(PairwisePearsonCorrelationLoss, self).__init__()
+        self.comb = list(combinations(range(N), 2))  # All unique pairs of sources
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor, dummy: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Estimated sources tensor of shape [B, N, T]
+            dummy (torch.Tensor): Dummy argument (not used)
+        Returns:
+            torch.Tensor: Scalar loss value
+        """
+        B, N, T = x.shape
+        if N <= 1:
+            # If there is only 1 source, correlation between different sources cannot be computed.
+            return torch.tensor(0.0, device=x.device, dtype=x.dtype)
         
+        def Pearson(estim,target):
+            # Compute Pearson Correlation Coefficient
+            numerator = torch.sum(estim * target, dim=-1)
+            denominator = torch.sqrt(torch.sum(estim ** 2, dim=-1) * torch.sum(target ** 2, dim=-1) + 1e-8)
+            correlation = numerator / denominator
+            return correlation
+        
+        loss = 0.0
+        for i, j in self.comb:
+            corr = Pearson(x[:, i, :], x[:, j, :])  # Shape: [B]
+            loss += torch.mean(corr ** 2)  # Penalize squared correlation
+      
+        return loss
+    
+
+
+### Integrated Loss Module
+class ListLoss(nn.Module):
+    def __init__(self,hp, loss_list : list, weight_list = None):
+        super(ListLoss, self).__init__()
+        self.loss_list = loss_list
+        self.hp = hp
+
+        losses = []
+        
+        for loss in loss_list:
+            cls = globals()[loss]
+            m = cls(**hp[loss])
+            self.add_module(loss,m)
+            losses.append(m)
+
+        self.weight = torch.ones(len(losses))
+
+        if weight_list is not None:
+            if len(weight_list) != len(losses):
+                raise ValueError("weight_list must be the same length as loss_list")
+
+            for i, weight in enumerate(weight_list):
+                if weight is not None:
+                    self.weight[i] = weight 
+
+        self.n_modules = len(losses)
+        self.losses = nn.ModuleList(losses)
+        
+    def forward(self, output, target):
+        self.weight = self.weight.to(output.device)
+        loss = 0
+        for i in range(self.n_modules):
+            l = self.losses[i](output, target) * self.weight[i]
+            loss += l
+            if torch.isnan(l):
+                print(f"Loss {self.loss_list[i]} is NaN")
+
+        return loss
