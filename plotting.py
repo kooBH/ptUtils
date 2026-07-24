@@ -48,7 +48,7 @@ def spec2plot(data : np.ndarray,normalized=True):
 
     np.seterr(divide = 'warn') 
 
-    mag = 10*np.log(mag)
+    mag = 10*np.log(mag + 1e-10)
     fig, ax = plt.subplots()
     im = plt.imshow(mag, cmap=cm.jet, aspect='auto',origin='lower')
     plt.colorbar(im)
@@ -59,6 +59,7 @@ def spec2plot(data : np.ndarray,normalized=True):
     
     fig.canvas.draw()
     plot = fig2np(fig)
+    plt.close(fig)
     return plot
 
 def mag2plot(data):

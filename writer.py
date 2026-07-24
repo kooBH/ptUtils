@@ -12,14 +12,13 @@ except ImportError:
 class MyWriter(SummaryWriter):
     def __init__(self, logdir, n_fft=512,n_hop=128,sr=16000):
         super(MyWriter, self).__init__(logdir,flush_secs=1)
-
         self.n_fft = n_fft
         self.n_hop = n_hop
         self.sr = sr
-
         self.window = torch.hann_window(window_length=n_fft, periodic=True,
                                dtype=None, layout=torch.strided, device=None,
                                requires_grad=False)
+        
     def log_value(self, train_loss, step,tag):
         self.add_scalar(tag, train_loss, step)
 

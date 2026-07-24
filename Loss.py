@@ -852,39 +852,38 @@ SOFTWARE.
 """
 
 class MagMSELoss(SpecLoss):
-    def __init__(self, n_fft,n_hop,**kwargs): 
+    """MSE of (optionally power-law compressed) magnitudes.
+    compression=0.3 matches the FastEnhancer recipe."""
+    def __init__(self, n_fft,n_hop, compression: float = 1.0, eps=1e-7,**kwargs):
         super().__init__(n_fft,n_hop)
+        self.compression = compression
+        self.eps = eps
     def forward(self, s1: Tensor, s2: Tensor) -> Tensor:
         s1 = self.Analysis(s1)
         s2 = self.Analysis(s2)
         s1 = torch.abs(s1)
         s2 = torch.abs(s2)
+        if self.compression != 1.0:
+            s1 = s1.clamp(min=self.eps).pow(self.compression)
+            s2 = s2.clamp(min=self.eps).pow(self.compression)
         return F.mse_loss(s1, s2)
 
 class ComplexMSELoss(SpecLoss):
-    def __init__(self, n_fft, n_hop, **kwargs):
+    """MSE of (optionally power-law compressed) complex spectra.
+    compression=0.3 matches the FastEnhancer recipe."""
+    def __init__(self, n_fft, n_hop, compression: float = 1.0, eps=1e-7,**kwargs):
         super().__init__(n_fft,n_hop)
-    
+        self.compression = compression
+        self.eps = eps
+
     def forward(self, s1: Tensor, s2: Tensor) -> Tensor:
         s1 = self.Analysis(s1)
         s2 = self.Analysis(s2)
+        if self.compression != 1.0:
+            s1 = s1 * torch.abs(s1).clamp(min=self.eps).pow(self.compression - 1.0)
+            s2 = s2 * torch.abs(s2).clamp(min=self.eps).pow(self.compression - 1.0)
         return F.mse_loss(torch.view_as_real(s1), torch.view_as_real(s2))
 
-class PESQLoss(nn.Module):
-    def __init__(self,**kwargs):
-        from torch_pesq import PesqLoss
-        super().__init__()
-        self.initialized = False
-        self.pesq_loss = PesqLoss(1.0, sample_rate=16_000)
-    
-    def forward(self, estim, target) -> Tensor:
-        if not self.initialized:
-            self.pesq_loss.to(estim.device)
-            self.initialized = True
-        with torch.amp.autocast("cuda", enabled=False):
-            loss = self.pesq_loss(target.float(), estim.float())
-        return loss.mean()
-    
 class WavL1Loss(nn.Module):
     def __init__(self,**kwargs):
         super().__init__()
@@ -1086,6 +1085,37 @@ class PairwisePearsonCorrelationLoss(nn.Module):
             corr = Pearson(x[:, i, :], x[:, j, :])  # Shape: [B]
             loss += torch.mean(corr ** 2)  # Penalize squared correlation
       
+        return loss
+
+# https://github.com/audiolabs/torch-pesq
+from torch_pesq import PesqLoss
+class PESQLoss(nn.Module):
+    def __init__(self, fs: int = 16000, target_pesq: float = 4.5):
+        super(PESQLoss, self).__init__()
+        # Initialize the differentiable TorchPESQ instance
+        self.pesq_kernel = PesqLoss(1.0, sample_rate=fs)
+        self.target_pesq = target_pesq
+
+    def forward(self, estim: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            estim (torch.Tensor): Estimated audio tensor of shape [B, T] or [B, 1, T]
+            clean (torch.Tensor): Target clean audio tensor of shape [B, T] or [B, 1, T]
+        Returns:
+            torch.Tensor: Scalar loss value with grad_fn intact
+        """
+        # Ensure the tensors are 2D: [B, T] to match torch-pesq input requirements
+        if estim.dim() == 3:
+            estim = estim.squeeze(1)
+        if clean.dim() == 3:
+            clean = clean.squeeze(1)
+
+        # PesqLoss.forward(ref, deg): the clean reference comes first.
+        # Computed in fp32 with autocast disabled (torch-pesq IIR filters are
+        # numerically unstable in fp16).
+        with torch.amp.autocast("cuda", enabled=False):
+            loss = self.pesq_kernel(clean.float(), estim.float())  # Shape: [B]
+        loss = torch.mean(loss)
         return loss
     
 
