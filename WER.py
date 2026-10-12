@@ -32,6 +32,8 @@ import jiwer
 from tqdm.auto import tqdm
 
 def list_audio(fmt, root: Union[str, Path]) -> list[Path]:
+    if root is None:
+        return []
     root = Path(root)
     return sorted(
         p for p in root.rglob("*")
