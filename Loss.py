@@ -155,12 +155,15 @@ class wMSELoss(nn.Module) :
 
 
 class mwMSELoss(nn.Module):
-    def __init__(self, alpha=0.99, eps=1e-7, sr=16000, n_fft=512, n_mels=40, device="cuda:0"):
+    def __init__(self, alpha=0.99, eps=1e-7, sr=16000, n_fft=512, n_mels=40, n_hop=None, device="cuda:0"):
         super(mwMSELoss, self).__init__()
         self.alpha = alpha
         self.eps = eps
         self.sr = sr
         self.n_fft = n_fft
+        # torch.stft's default hop is n_fft//4, which is what this loss used
+        # before n_hop existed -- keep that as the default.
+        self.n_hop = n_fft//4 if n_hop is None else n_hop
         self.device = device
 
         mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft,n_mels=n_mels)
@@ -177,8 +180,8 @@ class mwMSELoss(nn.Module):
             output : STFT [B,L]
             target : STFT [B,L]
         """
-        output = torch.stft(output, self.n_fft, window=self.hann,return_complex=True)
-        target = torch.stft(target, self.n_fft, window=self.hann,return_complex=True)
+        output = torch.stft(output, self.n_fft, hop_length=self.n_hop, window=self.hann,return_complex=True)
+        target = torch.stft(target, self.n_fft, hop_length=self.n_hop, window=self.hann,return_complex=True)
 
         # ERROR : weight becomes NAN
         # --> torch backpropagation weight clipping on 'sqrt'
@@ -213,6 +216,76 @@ class mwMSELoss(nn.Module):
 
         return  mwMSE
 
+
+class MultiscalemwMSELoss(nn.Module):
+    """Multi-scale ``mwMSELoss`` : one mel-weighted error per STFT resolution.
+
+    Same pattern as ``MultiscaleCosSDRLoss`` / ``MultiscaleSpectrogramLoss`` --
+    the base loss is evaluated at several window sizes and the results are
+    averaged. A single ``n_fft`` fixes one time/frequency trade-off; short
+    windows resolve onsets and transients, long windows resolve pitch harmonics,
+    so the sum supervises both.
+
+    Note the mel filterbank depends on ``n_fft``, so each scale carries its own
+    basis (one ``mwMSELoss`` submodule per scale) rather than sharing one.
+
+    Args:
+        chunk_sizes (list[int]): ``n_fft`` per scale (largest first, by convention).
+        alpha (float): asymmetry of the weighted error, as in ``mwMSELoss``
+                    (over-estimation vs. under-estimation).
+        n_mels (int | list[int]): mel bands, shared or one per scale. Must not
+                    exceed the number of FFT bins (``n_fft//2 + 1``) -- a short
+                    window cannot support many narrow low-frequency bands, and
+                    librosa silently returns all-zero (dead) filters instead.
+        overlap (float): hop as a fraction of the window, matching the
+                    ``SpectrogramLoss`` convention (0.25 -> hop = n_fft//4, the
+                    single-scale ``mwMSELoss`` default).
+        weight (list[float]): optional per-scale weight; defaults to uniform.
+        reduction (callable): applied to the stacked per-scale losses.
+    """
+    def __init__(self, chunk_sizes=[1024, 512, 256], alpha=0.99, eps=1e-7, sr=16000,
+                 n_mels=40, overlap=0.25, weight=None, reduction=torch.mean,
+                 device="cuda:0", **kwargs):
+        super(MultiscalemwMSELoss, self).__init__()
+        self.chunk_sizes = list(chunk_sizes)
+        n_scale = len(self.chunk_sizes)
+
+        # not isinstance(...,list) : hydra hands over an omegaconf ListConfig
+        if isinstance(n_mels, int):
+            mels = [n_mels] * n_scale
+        else:
+            mels = [int(m) for m in n_mels]
+            if len(mels) != n_scale:
+                raise ValueError("n_mels must be an int or one value per scale : got {} for {} scales".format(len(mels), n_scale))
+
+        for n_fft, n_mel in zip(self.chunk_sizes, mels):
+            if n_mel > n_fft//2 + 1:
+                raise ValueError("n_mels={} exceeds the {} FFT bins of n_fft={} : the mel basis would contain empty filters".format(n_mel, n_fft//2 + 1, n_fft))
+
+        self.losses = nn.ModuleList([
+            mwMSELoss(alpha=alpha, eps=eps, sr=sr, n_fft=n_fft, n_mels=n_mel,
+                      n_hop=max(1, int(n_fft*overlap)), device=device)
+            for n_fft, n_mel in zip(self.chunk_sizes, mels)
+        ])
+
+        if weight is None:
+            weight = [1.0] * n_scale
+        else:
+            weight = [float(w) for w in weight]
+            if len(weight) != n_scale:
+                raise ValueError("weight must have one value per scale : got {} for {} scales".format(len(weight), n_scale))
+        self.register_buffer("weight", torch.tensor(weight, dtype=torch.float32))
+
+        self.reduction = reduction
+
+    def forward(self, output, target):
+        """
+            output : [B,L] time domain audio
+            target : [B,L] time domain audio
+        """
+        loss_per_scale = torch.stack([loss(output, target) for loss in self.losses])
+        return self.reduction(loss_per_scale * self.weight.to(loss_per_scale.device))
+
 """
 weighted-SDR loss
 """
@@ -242,13 +315,26 @@ class CosSDRLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, output, target, chunk_size=1024):
+        # Non-divisible lengths used to be handled by truncating the remainder,
+        # which left the signal tail unsupervised at every scale (T=48000 -> the
+        # last 384 samples were invisible to ALL chunk sizes). v90 exploited
+        # this: a huge burst in the blind tail decorrelated the output streams
+        # for free. Instead, cover the remainder with one extra chunk taken
+        # from the end (a few samples get weighted twice — harmless).
+        T = output.shape[-1]
+        if T < chunk_size:
+            out_chunks = output.unsqueeze(1)
+            trg_chunks = target.unsqueeze(1)
+        else:
+            n_full = T // chunk_size
+            out_chunks = torch.reshape(output[..., : n_full * chunk_size],
+                                       [output.shape[0], -1, chunk_size])
+            trg_chunks = torch.reshape(target[..., : n_full * chunk_size],
+                                       [target.shape[0], -1, chunk_size])
+            if T % chunk_size != 0:
+                out_chunks = torch.cat([out_chunks, output[..., -chunk_size:].unsqueeze(1)], dim=1)
+                trg_chunks = torch.cat([trg_chunks, target[..., -chunk_size:].unsqueeze(1)], dim=1)
 
-        if output.shape[1]% chunk_size != 0:
-            output = output[..., : -(output.shape[-1] % chunk_size)]
-            target = target[..., : -(target.shape[-1] % chunk_size)]
-
-        out_chunks = torch.reshape(output, [output.shape[0], -1, chunk_size])
-        trg_chunks = torch.reshape(target, [target.shape[0], -1, chunk_size])
         loss_per_element = torch.mean(
             self.segment_loss(out_chunks, trg_chunks), dim=-1
         )
@@ -361,7 +447,7 @@ class SpectrogramLoss(nn.Module):
         return {"SpectrogramLoss": loss} if out_dict else loss
 
 class MultiscaleSpectrogramLoss(nn.Module):
-    def __init__(self, chunk_sizes, reduction=torch.mean,overlap=0.25,type_weight=None,norm_window=False,weight_mag = 1.0, weight_cplx = 1.0, alpha_mag = None):
+    def __init__(self, chunk_sizes, reduction=torch.mean,overlap=0.25,type_weight=None,norm_window=False,weight_mag = 1.0, weight_cplx = 1.0, alpha_mag = None,**kwargs):
         super(MultiscaleSpectrogramLoss, self).__init__()
         self.chunk_sizes = chunk_sizes
         self.loss = SpectrogramLoss(nn.Identity(),overlap=overlap,type_weight=type_weight,norm_window=norm_window,weight_mag=weight_mag, weight_cplx=weight_cplx, alpha_mag=alpha_mag)
@@ -975,16 +1061,27 @@ class PITLoss(nn.Module):
 
 
 ####### ACCDOA #####
-def ACCDOA_label(vad,azimuth,elevation):
+def ACCDOA_label(vad,azimuth,elevation,deg=False):
     """Generates ACCDOA (Activity-coupled Cartesian Direction of Arrival) labels.
     Args:
         vad (torch.Tensor): Voice Activity Detection format with shape [B, N, T]
-        azimuth (torch.Tensor): Azimuth angle in radians with shape [B, N]
-        elevation (torch.Tensor): Elevation angle in radians with shape [B, N]
+        azimuth (torch.Tensor): Azimuth angle with shape [B, N]
+        elevation (torch.Tensor): Elevation angle with shape [B, N]
+        deg (bool): set True when azimuth/elevation are in DEGREES. ``DatasetRIR``
+                    emits degrees (see ``_azimuth``/``_elevation``), so callers
+                    feeding it directly must pass ``deg=True`` -- otherwise the
+                    degree values go into cos/sin as radians and the label wraps
+                    many times across the target angle range, making the DoA
+                    direction unlearnable. Default False preserves the original
+                    radian behaviour for existing callers.
     Returns:
         torch.Tensor: ACCDOA labels with shape [B, N, T, 3]
                       The last dimension contains [x, y, z] coordinates.
     """
+    if deg:
+        azimuth = azimuth * (np.pi / 180.0)
+        elevation = elevation * (np.pi / 180.0)
+
     # 1. Unsqueeze to align with the time dimension (T) of VAD [B, N] -> [B, N, 1]
     azimuth_expanded = azimuth.unsqueeze(-1)
     elevation_expanded = elevation.unsqueeze(-1)
@@ -1009,9 +1106,10 @@ def ACCDOA_label(vad,azimuth,elevation):
     return acc_doa
 
 class PIT_ACCDOALoss(nn.Module):
-    def __init__(self, max_src):
+    def __init__(self, max_src, deg=False):
         super(PIT_ACCDOALoss, self).__init__()
         self.max_src = max_src
+        self.deg = deg      # True when the DoA labels are in degrees; see ACCDOA_label
         self.criterion = nn.MSELoss(reduction='none')  # Compute loss per element for PIT
         self.perms = list(itertools.permutations(range(self.max_src)))
 
@@ -1020,13 +1118,13 @@ class PIT_ACCDOALoss(nn.Module):
         Args:
             estim: (Batch, Num_Sources, Time, 3) - Predicted ACCDOA vectors
             target_vad: (Batch, Num_Sources, Time`) - Ground truth VAD. Time dimension may differ from estim, but should be interpolated
-            target_azimuth: (Batch, Num_Sources) - Ground truth azimuth angles in radians
-            target_elevation: (Batch, Num_Sources) - Ground truth elevation angles in radians
+            target_azimuth: (Batch, Num_Sources) - Ground truth azimuth angles (radians, or degrees if self.deg)
+            target_elevation: (Batch, Num_Sources) - Ground truth elevation angles (radians, or degrees if self.deg)
         Returns:
             loss: Scalar tensor representing the PIT loss over ACCDOA predictions.
         """
         # Generate target ACCDOA labels from VAD and DOA angles
-        target_accdoa = ACCDOA_label(target_vad, target_azimuth, target_elevation) # [B,N,T,3]
+        target_accdoa = ACCDOA_label(target_vad, target_azimuth, target_elevation, deg=self.deg) # [B,N,T,3]
 
         # Interpolate estimated ACCDOA to match the time dimension of target_vad if necessary
         if estim.shape[2] != target_accdoa.shape[2]:
@@ -1050,21 +1148,164 @@ class PIT_ACCDOALoss(nn.Module):
         # Average over the batch to get the final scalar loss
         return torch.mean(min_loss_per_sample)
 
+
+class PIT_SplitACCDOALoss(nn.Module):
+    r"""ACCDOA loss split into an activity (VAD) term and a localization (DoA) term.
+
+    .. math::
+        L_{split} = \alpha \cdot MSE(\|\hat{P}\|, \|P\|)
+                  + \beta  \cdot \mathbb{I}_{active} \cdot
+                    MSE\left(\frac{\hat{P}}{\|\hat{P}\|}, \frac{P}{\|P\|}\right)
+
+    The plain ACCDOA MSE (``PIT_ACCDOALoss``) mixes both jobs into one target:
+    an inactive frame pulls the whole vector to 0, so the direction gradient on
+    active frames is scaled by the activity level and silence dominates the
+    objective whenever VAD is sparse. Splitting them lets the magnitude branch
+    learn VAD and the *unit-vector* branch learn DoA, with the direction term
+    evaluated **only on active frames** (``I_active``) and averaged over those
+    frames alone -- so the localization gradient no longer shrinks as the
+    utterance gets sparser.
+
+    Args:
+        max_src (int): number of speaker slots; PIT is over all permutations.
+        alpha (float): weight of the activity / magnitude term.
+        beta (float): weight of the localization / direction term.
+        deg (bool): True when azimuth/elevation labels are in DEGREES
+                    (``DatasetRIR`` emits degrees). See ``ACCDOA_label``.
+        active_thr (float): a target frame counts as active when
+                    ``||P|| > active_thr``. VAD labels are 0/1 so 0.5 splits
+                    them; lower it for soft VAD.
+        eps (float): floor on the norm used for the unit-vector division
+                    (``P / max(||P||, eps)``, as in ``F.normalize``). It also
+                    bounds the direction gradient by ~1/eps -- with a true
+                    1e-8 guard an all-but-zero estimate produces gradients of
+                    order 1e5 early in training, so keep this loose (1e-3).
+
+    ``forward`` has the same signature and returns the same scalar as
+    ``PIT_ACCDOALoss``, so it is a drop-in replacement. The two terms of the
+    winning permutation are kept in ``last_loss_norm`` / ``last_loss_dir``
+    (detached, for logging).
+    """
+
+    def __init__(self, max_src, alpha=1.0, beta=1.0, deg=False, active_thr=0.5, eps=1e-3):
+        super(PIT_SplitACCDOALoss, self).__init__()
+        self.max_src = max_src
+        self.alpha = alpha
+        self.beta = beta
+        self.deg = deg
+        self.active_thr = active_thr
+        self.eps = eps
+        self.perms = list(itertools.permutations(range(self.max_src)))
+
+        # Terms of the selected permutation, for TensorBoard logging.
+        self.last_loss_norm = 0.0
+        self.last_loss_dir = 0.0
+
+    def _terms(self, estim, target):
+        """Per-sample (B,) activity and localization terms for one permutation.
+
+        estim / target : (B, N, T, 3)
+        """
+        norm_estim = torch.linalg.vector_norm(estim, dim=-1)     # (B,N,T)
+        norm_target = torch.linalg.vector_norm(target, dim=-1)   # (B,N,T)
+
+        # --- activity : magnitude of the ACCDOA vector encodes speech presence
+        loss_norm = ((norm_estim - norm_target) ** 2).mean(dim=[1, 2])   # (B,)
+
+        # --- localization : unit vectors, active frames only
+        # F.normalize divides by max(||.||, eps), which keeps the gradient of a
+        # near-zero estimate bounded instead of blowing up like 1/||P_hat||.
+        unit_estim = F.normalize(estim, dim=-1, eps=self.eps)
+        unit_target = F.normalize(target, dim=-1, eps=self.eps)
+        se_dir = ((unit_estim - unit_target) ** 2).mean(dim=-1)          # (B,N,T)
+
+        active = (norm_target > self.active_thr).to(se_dir.dtype)        # I_active
+        n_active = active.sum(dim=[1, 2])                                # (B,)
+        loss_dir = (se_dir * active).sum(dim=[1, 2]) / n_active.clamp(min=1.0)
+
+        # A sample with no active frame contributes no direction gradient.
+        loss_dir = torch.where(n_active > 0, loss_dir, torch.zeros_like(loss_dir))
+        return loss_norm, loss_dir
+
+    def forward(self, estim, target_vad, target_azimuth, target_elevation):
+        """
+        Args:
+            estim: (Batch, Num_Sources, Time, 3) - Predicted ACCDOA vectors
+            target_vad: (Batch, Num_Sources, Time`) - Ground truth VAD. Time dimension may differ from estim, but should be interpolated
+            target_azimuth: (Batch, Num_Sources) - Ground truth azimuth angles (radians, or degrees if self.deg)
+            target_elevation: (Batch, Num_Sources) - Ground truth elevation angles (radians, or degrees if self.deg)
+        Returns:
+            loss: Scalar tensor representing the PIT split ACCDOA loss.
+        """
+        target_accdoa = ACCDOA_label(target_vad, target_azimuth, target_elevation, deg=self.deg)  # [B,N,T,3]
+
+        # Interpolate estimated ACCDOA to match the time dimension of target_vad if necessary
+        if estim.shape[2] != target_accdoa.shape[2]:
+            target_time = target_accdoa.shape[2]
+            target_3 = target_accdoa.shape[3]
+            estim = F.interpolate(estim, size=(target_time, target_3), mode='bilinear', align_corners=False)
+
+        norm_terms, dir_terms = [], []
+        for perm in self.perms:
+            loss_norm, loss_dir = self._terms(estim[:, perm, :, :], target_accdoa)
+            norm_terms.append(loss_norm)
+            dir_terms.append(loss_dir)
+
+        norm_terms = torch.stack(norm_terms, dim=1)   # (B, P)
+        dir_terms = torch.stack(dir_terms, dim=1)     # (B, P)
+
+        # PIT on the combined objective : the permutation is chosen once, both
+        # terms then come from that same permutation.
+        b_losses = self.alpha * norm_terms + self.beta * dir_terms
+        min_loss_per_sample, best_perm = torch.min(b_losses, dim=1)
+
+        idx = best_perm.unsqueeze(1)
+        self.last_loss_norm = norm_terms.gather(1, idx).mean().detach()
+        self.last_loss_dir = dir_terms.gather(1, idx).mean().detach()
+
+        return torch.mean(min_loss_per_sample)
+
+
 from itertools import combinations
 class PairwisePearsonCorrelationLoss(nn.Module):
-    def __init__(self, N: int, eps: float = 1e-8):
+    def __init__(self, N: int, eps: float = 1e-8, chunk_size: int = None, center: bool = True):
         """
         Loss function to penalize pairwise Pearson correlation between N sources.
+
+        chunk_size: when set, the correlation is computed per chunk and
+        averaged (with an extra end-aligned chunk covering any remainder).
+        The global (chunk_size=None) form is normalised by the full-signal
+        norms, so one high-energy artifact anywhere zeroes the correlation —
+        v90 exploited this with a burst in the last samples of stream 2. With
+        chunks, an artifact only decorrelates its own chunk, so the exploit
+        stops paying.
+        center: subtract the per-chunk mean before correlating (true Pearson).
         """
         super(PairwisePearsonCorrelationLoss, self).__init__()
         self.comb = list(combinations(range(N), 2))  # All unique pairs of sources
         self.eps = eps
+        self.chunk_size = chunk_size
+        self.center = center
 
-    def forward(self, x: torch.Tensor, dummy: torch.Tensor) -> torch.Tensor:
+    def _chunk(self, sig: torch.Tensor) -> torch.Tensor:
+        # sig: [B, T] -> [B, n_chunks, chunk_size]
+        B, T = sig.shape
+        cs = self.chunk_size
+        if cs is None or T <= cs:
+            return sig.unsqueeze(1)
+        n_full = T // cs
+        chunks = sig[..., : n_full * cs].reshape(B, -1, cs)
+        if T % cs != 0:
+            # cover the remainder with one end-aligned chunk (no blind tail)
+            chunks = torch.cat([chunks, sig[..., -cs:].unsqueeze(1)], dim=1)
+        return chunks
+
+    def forward(self, x: torch.Tensor, clean: torch.Tensor, n_spks: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x (torch.Tensor): Estimated sources tensor of shape [B, N, T]
-            dummy (torch.Tensor): Dummy argument (not used)
+            clean (torch.Tensor): Clean sources tensor of shape [B, N, T]
+            n_spks (torch.Tensor): Number of speakers tensor of shape [B]
         Returns:
             torch.Tensor: Scalar loss value
         """
@@ -1072,52 +1313,126 @@ class PairwisePearsonCorrelationLoss(nn.Module):
         if N <= 1:
             # If there is only 1 source, correlation between different sources cannot be computed.
             return torch.tensor(0.0, device=x.device, dtype=x.dtype)
-        
+
+        # Create a mask for samples that have 2 or more speakers
+        # Shape: [B]
+        valid_mask = (n_spks >= 2).float()
+
+        # If there are no valid samples with >= 2 speakers in the current batch, return 0.0
+        if valid_mask.sum() == 0:
+            return torch.tensor(0.0, device=x.device, dtype=x.dtype, requires_grad=True)
+
         def Pearson(estim,target):
-            # Compute Pearson Correlation Coefficient
+            # Compute Pearson Correlation Coefficient per chunk: [B, K]
+            if self.center:
+                estim  = estim  - estim.mean(dim=-1, keepdim=True)
+                target = target - target.mean(dim=-1, keepdim=True)
             numerator = torch.sum(estim * target, dim=-1)
             denominator = torch.sqrt(torch.sum(estim ** 2, dim=-1) * torch.sum(target ** 2, dim=-1) + 1e-8)
             correlation = numerator / denominator
             return correlation
-        
+
         loss = 0.0
+        pair_count = 0
         for i, j in self.comb:
-            corr = Pearson(x[:, i, :], x[:, j, :])  # Shape: [B]
-            loss += torch.mean(corr ** 2)  # Penalize squared correlation
-      
-        return loss
+            # Check if both channels are valid for the active speakers
+            # Assuming active speakers occupy the first n_spks channels
+            # If your active channels are defined differently, this mask logic can be adjusted.
+            speaker_mask = ((n_spks > i) & (n_spks > j)).float()
 
-# https://github.com/audiolabs/torch-pesq
-from torch_pesq import PesqLoss
-class PESQLoss(nn.Module):
-    def __init__(self, fs: int = 16000, target_pesq: float = 4.5):
-        super(PESQLoss, self).__init__()
-        # Initialize the differentiable TorchPESQ instance
-        self.pesq_kernel = PesqLoss(1.0, sample_rate=fs)
-        self.target_pesq = target_pesq
+            # Combine batch validity mask and active speaker mask
+            combined_mask = valid_mask * speaker_mask
 
-    def forward(self, estim: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
+            corr = Pearson(self._chunk(x[:, i, :]), self._chunk(x[:, j, :]))  # [B, K]
+            squared_corr = (corr ** 2).mean(dim=-1)  # average over chunks: [B]
+
+            # Apply mask to penalize only valid speaker pairs within valid samples
+            squared_corr = squared_corr * combined_mask
+
+            # Average over the valid samples for this specific pair
+            loss += torch.sum(squared_corr) / (combined_mask.sum() + self.eps)
+            pair_count += 1
+
+        if pair_count == 0:
+            return torch.tensor(0.0, device=x.device, dtype=x.dtype, requires_grad=True)
+
+        return loss / pair_count
+
+
+class SplitFeatureDecorrLoss(nn.Module):
+    """Decorrelation penalty on the speaker-split features (aux['x_sep']).
+
+    Anti-collapse term for the AttractorSplit/SplitModule stage. The waveform
+    Pearson penalty can be satisfied by per-slot dropout noise (slots are
+    folded into the batch dim in the decoder, so their dropout masks are
+    independent); x_sep, however, is produced from ONE shared encoder forward
+    by the dropout-free SplitModule, so any difference between slots must come
+    from the deterministic attractor conditioning. Penalising slot similarity
+    here pressures the deterministic function itself.
+
+    Per active slot pair (i, j): relu(|cos(f_i, f_j)| - margin)^2, where f is
+    the mean-centred flattened (T, F, C) feature. A collapsed pair has
+    cos = 1 -> penalty (1 - margin)^2; once cos drops below the margin the
+    gradient vanishes, so genuinely shared mixture structure is not punished.
+    """
+    def __init__(self, N: int, margin: float = 0.5, eps: float = 1e-8):
+        super().__init__()
+        self.comb = list(combinations(range(N), 2))
+        self.margin = margin
+        self.eps = eps
+
+    def forward(self, x_sep: torch.Tensor, n_spks: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            estim (torch.Tensor): Estimated audio tensor of shape [B, T] or [B, 1, T]
-            clean (torch.Tensor): Target clean audio tensor of shape [B, T] or [B, 1, T]
+            x_sep (torch.Tensor): Slot features of shape [B, N, T, F, C]
+            n_spks (torch.Tensor): Number of speakers of shape [B]
         Returns:
-            torch.Tensor: Scalar loss value with grad_fn intact
+            torch.Tensor: Scalar loss value
         """
-        # Ensure the tensors are 2D: [B, T] to match torch-pesq input requirements
-        if estim.dim() == 3:
-            estim = estim.squeeze(1)
-        if clean.dim() == 3:
-            clean = clean.squeeze(1)
+        B, N = x_sep.shape[0], x_sep.shape[1]
+        if N <= 1 or len(self.comb) == 0:
+            return torch.tensor(0.0, device=x_sep.device, dtype=x_sep.dtype)
 
-        # PesqLoss.forward(ref, deg): the clean reference comes first.
-        # Computed in fp32 with autocast disabled (torch-pesq IIR filters are
-        # numerically unstable in fp16).
-        with torch.amp.autocast("cuda", enabled=False):
-            loss = self.pesq_kernel(clean.float(), estim.float())  # Shape: [B]
-        loss = torch.mean(loss)
+        feats = x_sep.reshape(B, N, -1)
+        feats = feats - feats.mean(dim=-1, keepdim=True)
+
+        loss = 0.0
+        pair_count = 0
+        total_mask = 0.0
+        for i, j in self.comb:
+            # both slots of the pair must be active (first n_spks slots are)
+            pair_mask = ((n_spks > i) & (n_spks > j)).float()          # [B]
+            cos = torch.sum(feats[:, i] * feats[:, j], dim=-1) / (
+                feats[:, i].norm(dim=-1) * feats[:, j].norm(dim=-1) + self.eps)
+            pen = torch.relu(cos.abs() - self.margin) ** 2
+            loss += torch.sum(pen * pair_mask) / (pair_mask.sum() + self.eps)
+            total_mask += pair_mask.sum()
+            pair_count += 1
+
+        if total_mask == 0:
+            return torch.tensor(0.0, device=x_sep.device, dtype=x_sep.dtype, requires_grad=True)
+        return loss / pair_count
+
+#  Loss for clean mixture MSE.
+class CleanMixMSELoss(nn.Module):
+    """    
+    Loss for After encoder and before decoder, to make encoder as noise suppressor.
+    estim : [B, M, T] - Sum of Estimated sources
+    clean : [B, M, T] - Sum of Clean sources
+    """
+    def __init__(self, chunk_sizes, reduction=torch.mean, overlap=0.5, type_weight=None, norm_window=False, weight_mag=1.0, weight_cplx=1.0, alpha_mag=None, **kwargs):
+        super(CleanMixMSELoss, self).__init__()
+        self.criterion = MultiscaleSpectrogramLoss(chunk_sizes=chunk_sizes, reduction=reduction, overlap=overlap, type_weight=type_weight, norm_window=norm_window, weight_mag=weight_mag, weight_cplx=weight_cplx, alpha_mag=alpha_mag, **kwargs)
+
+    def forward(self, estim, clean_mix):
+        #  estim : [B, M, T] - Sum of Estimated sources
+        # clean_mix : [B, 1, T] - Sum of Clean sources
+
+        # B,M,T -> B*M,T
+        estim = estim.view(estim.size(0)*estim.size(1), estim.size(2))
+        clean_mix = clean_mix.view(clean_mix.size(0)*clean_mix.size(1), clean_mix.size(2))
+        loss = self.criterion(estim, clean_mix)
         return loss
-    
 
 
 ### Integrated Loss Module
