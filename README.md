@@ -5,7 +5,7 @@
 Training/eval helpers: `Loss.py` (multiscale spectral / CosSDR / PIT / ACCDOA /
 Pearson losses, `ListLoss` combiner), `WER.py` / `WER_mult.py` (Whisper + jiwer
 WER, single- and permutation-invariant multi-target), `metric.py` (PESQ, STOI,
-SI-SDR), `writer.py` (TensorBoard; tags must be unique), `GradientStabilizer.py`
+SI-SDR), `wnb_writer.py` (W&B, default via `common.py:get_writer()`; same API as `writer.py`), `writer.py` (TensorBoard, `log.writer=tensorboard`; tags must be unique), `GradientStabilizer.py`
 (norm-fixing gradient rescaling), `EMA.py` (weight EMA evaluated/saved per epoch
 by `train_SS.py`), `schedule.py` (warm-up schedulers).
 
@@ -70,6 +70,17 @@ Configs without the block run unchanged. When enabled, raw and stabilized norms 
 
 `step()` returns `(rho, R)` for logging (e.g. TensorBoard `train/grad_norm_raw` vs `train/grad_norm_stab`). Zero or non-finite gradient norms are a no-op and do not corrupt the EMA state. `state_dict()`/`load_state_dict()` are provided for checkpoint resume.
 
+## Loss.py — SpatialNet paper losses (`NegSISDRLoss`, `NegSASDRLoss`)
+
+Reproduce NBSS `neg_si_sdr` / `neg_sa_sdr` (torchmetrics formulas, `zero_mean=False`, eps = dtype machine eps); checked against torchmetrics, diff 0.0.
+
+| class | input | PIT | empty (all-zero) target |
+|---|---|---|---|
+| `NegSISDRLoss(reduction)` | `(…, L)` | wrap: `PITLoss(ListLoss([...]))` with `reduction: none` → per-sample permutation | undefined (SI-SDR of 0) |
+| `NegSASDRLoss(pit, scale_invariant, reduction)` | `(B, N, L)` or `(B, L)` | internal, per sample (`pit: True`, keep `loss.PITLoss.use: False`) | fine if another stream is active; all streams empty → loss ≈ +117 dB, finite gradient |
+
+`ListLoss`'s NaN check is `.any()` so a `(B,)` loss (`reduction: none`) can pass through it to `PITLoss`.
+
 ## Loss.py — ACCDOA losses
 
 Two PIT losses consume an ACCDOA head (`aux['accdoa']`, `(B, N, T, 3)`; see `models/TF_CorrNet_MISO_v3`). Both take `(estim, vad, azimuth, elevation)`, build the target with `ACCDOA_label`, interpolate `estim` along time when the frame counts differ, and return a scalar — so they are interchangeable in `train_SE.py` (`loss.ACCDOA.type`).
@@ -125,7 +136,21 @@ Notes:
 - `overlap: 0.25` reproduces the single-scale `mwMSELoss` hop exactly (`torch.stft`'s default `n_fft//4`) — `mwMSELoss` gained an explicit `n_hop` argument (default `None` → `n_fft//4`), so existing configs are unaffected.
 - Takes time-domain `[B, L]` like `mwMSELoss` and returns a scalar, so it drops into `ListLoss`. Under `PITLoss` the scalar means the permutation is picked batch-globally rather than per sample — same as the other scalar-returning losses here (`MultiscaleSpectrogramLoss`, …), not specific to this one.
 
-## TensorBoard
+## wnb_writer.py (W&B, default)
+
+`MyWandbWriter` has the `MyWriter` API (`log_value/log_audio/log_spec/log_mag/log_MFCC/log_DOA_wav/close`), so
+`train_SE.py` / `train_SS.py` only call `common.py:get_writer(cfg, log_dir)` (keys in `config/common/README.md`).
+
+| behaviour | why |
+|---|---|
+| x-axis = custom metric `global_step` (`define_metric("*", step_metric="global_step")`) | W&B's internal step must increase; a resumed run restarting at a lower `step` would be dropped |
+| calls with the same `step` are buffered → one `run.log` row; flushed on step change and `close()` | fewer history rows, images/audio of one step stay together |
+| `'/'` in a tag → panel section (`train/…`, `valid/…`) | |
+| telemetry import hooks removed after `wandb.init` (private `run._unregister_telemetry_import_hooks`, wandb 0.31.0) | DataLoader workers fork after init; librosa's lazy import of `joblib` on the first `rs.load` in a worker fired the hook → `ForkedError` → `DatasetRIR.__getitem__` retries |
+
+First use on a machine: `wandb login` (or `+log.wandb.mode=offline`, then `wandb sync <log.root>/log/<version>/wandb/offline-run-*`).
+
+## TensorBoard (`writer.py`, `log.writer=tensorboard`)
 Tensorboard 사용시, 클래스가 다르더라도 label이 달라야 한다 
 
 

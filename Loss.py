@@ -1436,6 +1436,67 @@ class CleanMixMSELoss(nn.Module):
 
 
 ### Integrated Loss Module
+####### SpatialNet recipe (Quan & Li, TASLP 2024; NBSS models/io/loss.py) #####
+# Same formulas as torchmetrics (zero_mean=False, eps = machine eps of the dtype), which NBSS calls.
+
+class NegSISDRLoss(nn.Module):
+    """
+    -SI-SDR [dB]. output, target : (..., L) -> (...) if reduction='none', else mean.
+    NBSS neg_si_sdr + pit=True  ==  PITLoss(ListLoss(['NegSISDRLoss']), reduction='none')
+    (per-sample permutation). Undefined for an all-zero target -> use NegSASDRLoss then.
+    """
+    def __init__(self, reduction : str = "mean"):
+        super().__init__()
+        assert reduction in ("mean", "none"), reduction
+        self.reduction = reduction
+
+    def forward(self, output, target):
+        eps = torch.finfo(output.dtype).eps
+        alpha = ((output * target).sum(-1, keepdim=True) + eps) / ((target ** 2).sum(-1, keepdim=True) + eps)
+        target = alpha * target
+        val = ((target ** 2).sum(-1) + eps) / (((target - output) ** 2).sum(-1) + eps)
+        loss = -10 * torch.log10(val)
+        return loss.mean() if self.reduction == "mean" else loss
+
+
+class NegSASDRLoss(nn.Module):
+    """
+    -SA-SDR [dB] (Neumann et al. 2022), aggregated over sources :
+        SA-SDR = 10 log10( (sum_n ||s_n||^2 + eps) / (sum_n ||s_n - s_hat_n||^2 + eps) )   (eps per source, as torchmetrics)
+    output, target : (B, N, L) or (B, L) (= N 1). An empty (all-zero) target stream is fine as long as
+    one stream is active -- the reason SpatialNet uses it on LibriCSS.
+    pit=True : permutation chosen per sample (NBSS pit(..., mode='permutation-wise')) -> do not wrap
+    with PITLoss (loss.PITLoss.use : False).
+    """
+    def __init__(self, pit : bool = True, scale_invariant : bool = False, reduction : str = "mean"):
+        super().__init__()
+        assert reduction in ("mean", "none"), reduction
+        self.pit = pit
+        self.scale_invariant = scale_invariant
+        self.reduction = reduction
+
+    def _sa_sdr(self, output, target):
+        eps = torch.finfo(output.dtype).eps
+        if self.scale_invariant:
+            alpha = ((output * target).sum(-1, keepdim=True) + eps) / ((target ** 2).sum(-1, keepdim=True) + eps)
+            target = alpha * target
+        num = ((target ** 2).sum(-1) + eps).sum(-1)
+        den = (((target - output) ** 2).sum(-1) + eps).sum(-1)
+        return 10 * torch.log10(num / den)
+
+    def forward(self, output, target):
+        if output.dim() == 2:
+            output, target = output.unsqueeze(1), target.unsqueeze(1)
+        N = output.shape[1]
+        if self.pit and N > 1:
+            val = torch.stack([self._sa_sdr(output[:, list(p)], target)
+                               for p in itertools.permutations(range(N))], dim=1).max(dim=1).values
+        else:
+            val = self._sa_sdr(output, target)
+        loss = -val
+        return loss.mean() if self.reduction == "mean" else loss
+
+
 class ListLoss(nn.Module):
     def __init__(self,hp, loss_list : list, weight_list = None):
         super(ListLoss, self).__init__()
@@ -1470,7 +1531,7 @@ class ListLoss(nn.Module):
         for i in range(self.n_modules):
             l = self.losses[i](output, target) * self.weight[i]
             loss += l
-            if torch.isnan(l):
+            if torch.isnan(l).any():   # .any() : losses with reduction='none' return (B,)
                 print(f"Loss {self.loss_list[i]} is NaN")
             lost_dict[self.loss_list[i]] = l
 
